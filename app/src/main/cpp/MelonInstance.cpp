@@ -41,6 +41,9 @@ MelonInstance::MelonInstance(int instanceId, std::shared_ptr<EmulatorConfigurati
     currentRenderer = Renderer::Software;
     isRenderConfigurationDirty = true;
     inputMask = 0xFFF;
+    touchState = 0;
+    lidClosed = false;
+    appliedLidClosed = false;
     frame = 0;
 
     net->RegisterInstance(instanceId);
@@ -356,7 +359,9 @@ u32 MelonInstance::runFrame()
         nds->GPU.GetRenderer3D().SetOutputTexture(backBuffer, renderFrame->frameTexture);
     }
 
+    applyFrameInput();
     u32 nLines = nds->RunFrame();
+    determinismHarness.afterFrame(nds);
     retroAchievementsManager->FrameUpdate();
 
     if (!isRendererAccelerated)
@@ -438,39 +443,58 @@ float MelonInstance::getMotionData(MotionQueryType type)
 
 void MelonInstance::touchScreen(u16 x, u16 y)
 {
-    nds->TouchScreen(x, y);
+    touchState = (1u << 31) | ((u32(x) & 0xFFF) << 16) | (u32(y) & 0xFFF);
 }
 
 void MelonInstance::releaseScreen()
 {
-    nds->ReleaseScreen();
+    touchState = 0;
 }
 
 void MelonInstance::pressKey(u32 key)
 {
     // Special handling for Lid input
     if (key == 16 + 7)
-    {
-        nds->SetLidClosed(true);
-    }
+        lidClosed = true;
     else
-    {
-        inputMask &= ~(1 << key);
-        nds->SetKeyMask(inputMask);
-    }
+        inputMask.fetch_and(~(1u << key));
 }
 
 void MelonInstance::releaseKey(u32 key)
 {
     // Special handling for Lid input
     if (key == 16 + 7)
-    {
-        nds->SetLidClosed(false);
-    }
+        lidClosed = false;
     else
+        inputMask.fetch_or(1u << key);
+}
+
+void MelonInstance::applyFrameInput()
+{
+    u32 touch = touchState.load();
+    FrameInput input {
+        .keyMask = inputMask.load(),
+        .touchX = static_cast<u16>((touch >> 16) & 0xFFF),
+        .touchY = static_cast<u16>(touch & 0xFFF),
+        .touching = static_cast<u8>((touch >> 31) & 1),
+        .lidClosed = static_cast<u8>(lidClosed.load() ? 1 : 0),
+        .reserved = {0, 0},
+    };
+
+    // The determinism harness may record this input or replace it with recorded input
+    determinismHarness.beforeFrame(nds, input);
+
+    nds->SetKeyMask(input.keyMask);
+    if (input.touching)
+        nds->TouchScreen(input.touchX, input.touchY);
+    else
+        nds->ReleaseScreen();
+
+    bool lid = input.lidClosed != 0;
+    if (lid != appliedLidClosed)
     {
-        inputMask |= (1 << key);
-        nds->SetKeyMask(inputMask);
+        nds->SetLidClosed(lid);
+        appliedLidClosed = lid;
     }
 }
 

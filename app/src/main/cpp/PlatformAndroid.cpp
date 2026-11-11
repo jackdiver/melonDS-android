@@ -18,6 +18,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cstring>
 #include <dlfcn.h>
 #include <filesystem>
 #include <stdio.h>
@@ -584,6 +585,12 @@ namespace Platform
 
     int Mic_ReadInput(s16* data, int maxlength, void* userdata)
     {
+        // Real microphone noise differs between devices; feed silence while checking determinism
+        if (MelonDSAndroid::determinismHarness.isActive())
+        {
+            memset(data, 0, maxlength * sizeof(s16));
+            return maxlength;
+        }
         return MelonDSAndroid::readMic(data, maxlength);
     }
 

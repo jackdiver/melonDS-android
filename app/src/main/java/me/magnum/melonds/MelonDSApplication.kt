@@ -38,6 +38,36 @@ class MelonDSApplication : Application(), Configuration.Provider {
         applyTheme()
         performMigrations()
         MelonDSAndroidInterface.setup(UriFileHandler(this, uriHandler))
+        registerDeterminismTestReceiver()
+    }
+
+    /**
+     * Debug builds only: drive the netplay determinism harness from a PC (see docs/netplay-plan.md).
+     *   adb shell am broadcast -p <package> -a me.magnum.melonds.NETPLAY_TEST --es cmd record
+     *   adb shell am broadcast -p <package> -a me.magnum.melonds.NETPLAY_TEST --es cmd replay --es tag s23
+     *   adb shell am broadcast -p <package> -a me.magnum.melonds.NETPLAY_TEST --es cmd stop
+     * Files live in <filesDir>/netplay-test (readable with `adb shell run-as <package>`).
+     */
+    private fun registerDeterminismTestReceiver() {
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+                val dir = java.io.File(filesDir, "netplay-test").apply { mkdirs() }.absolutePath
+                when (intent.getStringExtra("cmd")) {
+                    "record" -> MelonDSAndroidInterface.determinismRecord(dir)
+                    "replay" -> MelonDSAndroidInterface.determinismReplay(dir, intent.getStringExtra("tag") ?: "replay")
+                    "stop" -> MelonDSAndroidInterface.determinismStop()
+                    "selftest" -> MelonDSAndroidInterface.determinismSelfTest(intent.getIntExtra("frames", 300))
+                }
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            receiver,
+            android.content.IntentFilter("me.magnum.melonds.NETPLAY_TEST"),
+            androidx.core.content.ContextCompat.RECEIVER_EXPORTED,
+        )
     }
 
     private fun createNotificationChannels() {

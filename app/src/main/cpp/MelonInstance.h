@@ -14,6 +14,7 @@
 #include "renderer/ScreenshotRenderer.h"
 #include "retroachievements/RetroAchievementsManager.h"
 #include "net/Net.h"
+#include "netplay/DeterminismHarness.h"
 
 using namespace melonDS;
 
@@ -78,6 +79,7 @@ private:
     void updateRenderer();
     void setBatteryLevels();
     void setDateTime();
+    void applyFrameInput();
     void saveRewindState(RewindSaveState* rewindSaveState);
 
 private:
@@ -92,7 +94,14 @@ private:
     std::unique_ptr<SaveManager> ndsSave;
     std::unique_ptr<SaveManager> gbaSave;
     std::unique_ptr<SaveManager> firmwareSave;
-    u32 inputMask;
+
+    // Live input from the UI thread. Latched and applied once per frame at the start of runFrame(),
+    // so that input is frame-aligned (required for netplay determinism and recording).
+    std::atomic<u32> inputMask;
+    // bit 31 = touching, bits 16..27 = x, bits 0..11 = y
+    std::atomic<u32> touchState;
+    std::atomic<bool> lidClosed;
+    bool appliedLidClosed;
 
     std::shared_ptr<EmulatorConfiguration> currentConfiguration;
     FrameQueue frameQueue;
