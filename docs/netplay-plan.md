@@ -70,6 +70,31 @@ Rules learned for netplay:
 - New `DeterministicLocalMP` (an `MPInterface`): no wall-clock timeouts. Waits are ordered by emulated timestamp, so both instances exchange identical frames at identical emulated times. Needs deadlock handling when one instance is not in MP mode.
 - **Gate:** Mario Kart DS multi-card race between instance 0 and instance 1 on ONE phone (mirror driven by recorded input), and the same input recording gives identical hashes on both devices.
 
+#### Phase 2 progress (2026-11-11) — two consoles race on one phone
+Code: `netplay/DeterministicMP.*` (deterministic in-process wireless link), `netplay/MirrorSession.*`
+(hidden second console on its own thread, lockstep frames, focus switch), `MelonInstance::cloneFrom/runFrameHeadless`,
+`MPInterface::SetCustom` (small core change). Debug broadcast cmds: `mirror-start`, `mirror-stop`, `focus --ei index 0|1`.
+
+- Works on the S23: console 1 sees console 0's group, joins (2/8 racers), both go through game select,
+  character select and settings, and a VS race starts with both karts visible to each other.
+- Bugs found and fixed on the way: the mirror was never powered on (`NDS::Start`); the clone must follow the normal
+  launch path (`Reset` + `SetupDirectBoot` + `Start`, then load the state) because direct boot sets up state that
+  savestates do not carry; JIT fast memory is process-wide, so it is turned off for every console in a session.
+- Requires the software renderer (enforced) so 3D output is identical on every device.
+
+Update (2026-11-11, later): two-console record/replay added (`mirror-record`, `mirror-replay`, `mirror-recstop`).
+- With JIT on (fast memory off) the pair runs ~55 fps on the S23.
+- Odin replay matched the S23 recording for 5,105 frames (through the menus); S23 replays differ from frame 0
+  by 8 bytes of main RAM (a 3D fixed-point vector at 0x0216FF98), varying per run. Not threaded rendering, not
+  the GBA slot, not the mic, not the link. Reset-before-load did not fix it. Next: find which unsaved state differs
+  (dump GPU3D/registers on both phones at frame 0).
+- Link made time-based (reply rounds, membership, host-left check). Debug RAM dump code is temporary.
+
+Still open in phase 2:
+1. Speed: with the interpreter the pair ran at ~20 fps. Must re-test with the JIT on (fast memory off).
+2. Cross-device gate: extend the harness to record/replay both consoles' inputs and hash both, then compare S23 vs Odin.
+3. Remove the temporary progress logging in `MirrorSession::runFrame`.
+
 ### Phase 3: Network lockstep (≈2–3 days)
 - Session protocol over ENet (already linked): host/join, ROM hash check, netplay config sync.
 - Initial sync: host sends its savestate (includes SRAM) to the client. The client never writes this session to its own save file.
@@ -97,3 +122,32 @@ Rules learned for netplay:
 
 ## Rough size
 About 2–3 weeks of focused work. Phases 1 and 2 decide whether it is feasible; stop and reassess after each gate.
+
+### S23 JIT divergence: checkpoint result
+Session replay (JIT on) on the S23 vs the Odin, console 0 main RAM diffed at frames 0, 1000 and 5000:
+8 bytes differ at every checkpoint, always at 0x0216FF99-A6 and nowhere else. The difference never spreads,
+so it is treated as dead memory the game never reads. Desync checks should skip this range (or hash
+gameplay state only) until the root cause in the JIT is found.
+
+**Correction (longer run):** skipping those bytes is not enough. A full 8509-frame replay with the skip still
+diverges: brief one-frame mismatches (frames 573, 4089, 4833), then a lasting split from frame 5409.
+Dumps at those frames show:
+- 573: only the known stray bytes, plus ARM9 R12 (S23 0x07FFBB50, Odin 0). The stray stack bytes hold the
+  same 0x07FFBB50, so they are pushed host-dependent register values, not dead memory.
+- 5408/5409: real game state differs: main RAM 0x021E743C and 0x023FFF98, and a group of ARM7 WRAM
+  counters (offsets 0xAEB8-0xBA1A).
+Next step: find the ARM9 JIT path that leaves R12 holding a host-dependent value on the S23 (Android 17)
+but not on the Odin (Android 13), e.g. compare JIT vs interpreter R12 per block around frame 573.
+Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
+
+### Repeatability findings (two-console session, full 8509-frame replays)
+- Running the two consoles concurrently (worker thread) is **not repeatable on either phone**: the same
+  phone gives different hashes run to run (Odin: from frame 4934/5967/6946 in different runs; S23 similar).
+  There is a timing race between the console threads (likely in DeterministicMP or shared state).
+- Running them **one after the other (serial)** is repeatable: two Odin runs matched for all 8509 frames,
+  and S23 vs Odin matched everywhere except 3 single frames (4089, 4180, 4833) that line up again the
+  next frame. Serial is now the default (debug flag 32 = old concurrent mode). Cost: ~10% slower.
+- Those S23-only one-frame blips are the remaining JIT/host-state issue (the earlier stray stack bytes at
+  0x0216FF98 no longer appear with the current build).
+- Test tooling: replays now skip the frame limiter and write `done-<tag>.txt` when finished; a frame-0..2
+  per-block ARM9 trace hook (`melonDS::JitTraceHook9`) exists for debugging.

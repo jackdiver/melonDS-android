@@ -61,6 +61,13 @@ namespace MelonDSAndroid {
     extern void updateMotionData(float ax, float ay, float az, float rx, float ry, float rz);
     extern void start();
     extern u32 loop();
+    // Netplay phase 2 (debug): second console in the same process, see docs/netplay-plan.md
+    extern void requestMirrorStart(int debugFlags);
+    extern void requestMirrorStop();
+    extern void setMirrorFocus(int index);
+    extern void requestMirrorRecord(std::string directory);
+    extern void requestMirrorReplay(std::string directory, std::string tag);
+    extern void requestMirrorRecordStop();
     extern Frame* getPresentationFrame(std::optional<std::chrono::time_point<std::chrono::steady_clock>> deadline);
     extern void pause();
     extern void resume();

@@ -1,3 +1,4 @@
+#include <cstring>
 #include <ctime>
 #include <chrono>
 #include <EGL/egl.h>
@@ -367,11 +368,13 @@ u32 MelonInstance::runFrame()
     if (!isRendererAccelerated)
     {
         int frontbuf = nds->GPU.FrontBuffer;
-        if (nds->GPU.Framebuffer[frontbuf][0] && nds->GPU.Framebuffer[frontbuf][1])
+        NDS* source = presentationSource ? presentationSource() : nds;
+        frontbuf = source->GPU.FrontBuffer;
+        if (source->GPU.Framebuffer[frontbuf][0] && source->GPU.Framebuffer[frontbuf][1])
         {
             glBindTexture(GL_TEXTURE_2D, renderFrame->frameTexture);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, nds->GPU.Framebuffer[frontbuf][0].get());
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 192 + 2, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, nds->GPU.Framebuffer[frontbuf][1].get());
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, source->GPU.Framebuffer[frontbuf][0].get());
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 192 + 2, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, source->GPU.Framebuffer[frontbuf][1].get());
             glBindTexture(GL_TEXTURE_2D, 0);
         }
     }
@@ -415,6 +418,89 @@ u32 MelonInstance::runFrame()
     }
 
     return nLines;
+}
+
+u32 MelonInstance::runFrameHeadless()
+{
+    if (isRenderConfigurationDirty)
+    {
+        // Mirrors always render in software: no GL context exists on their thread
+        if (currentRenderer != Renderer::Software)
+        {
+            nds->GPU.SetRenderer3D(std::make_unique<SoftRenderer>());
+            currentRenderer = Renderer::Software;
+        }
+        isRenderConfigurationDirty = false;
+    }
+
+    applyFrameInput(false);
+    u32 nLines = nds->RunFrame();
+    frame++;
+    return nLines;
+}
+
+bool MelonInstance::cloneFrom(MelonInstance& source)
+{
+    ScopedCurrentNds currentGuard(nds);
+    const NDSCart::CartCommon* sourceCart = source.nds->NDSCartSlot.GetCart();
+    if (!sourceCart)
+        return false;
+
+    // Copy the cartridge (ROM + current save memory)
+    u32 romLength = sourceCart->GetROMLength();
+    auto romCopy = std::make_unique<u8[]>(romLength);
+    memcpy(romCopy.get(), sourceCart->GetROM(), romLength);
+
+    u32 saveLength = sourceCart->GetSaveMemoryLength();
+    std::unique_ptr<u8[]> saveCopy;
+    if (saveLength > 0)
+    {
+        saveCopy = std::make_unique<u8[]>(saveLength);
+        memcpy(saveCopy.get(), sourceCart->GetSaveMemory(), saveLength);
+    }
+
+    NDSCart::NDSCartArgs cartArgs {
+        .SDCard = std::nullopt,
+        .SRAM = std::move(saveCopy),
+        .SRAMLength = saveLength,
+    };
+    auto cart = NDSCart::ParseROM(std::move(romCopy), romLength, this, std::move(cartArgs));
+    if (!cart)
+        return false;
+    nds->SetNDSCart(std::move(cart));
+
+    // Mirrors must never write to the player's files
+    ndsSave.reset();
+    gbaSave.reset();
+    firmwareSave.reset();
+
+    // Follow the same path as a normal launch (see start()). Direct boot sets up state that savestates do not
+    // carry, e.g. the Nintendo logo copied into FreeBIOS, ARM7 BIOS protection and cart decryption tables.
+    nds->Reset();
+    std::string romName;
+    nds->SetupDirectBoot(romName);
+    nds->Start();
+
+    // Copy the emulated state. Loaded directly into the core (no RTC resync), see DeterminismHarness.
+    Savestate state;
+    {
+        ScopedCurrentNds sourceGuard(source.nds);
+        if (state.Error || !source.nds->DoSavestate(&state) || state.Error)
+            return false;
+    }
+    Savestate load(state.Buffer(), state.Length(), false);
+    if (load.Error || !nds->DoSavestate(&load) || load.Error)
+        return false;
+
+    isRenderConfigurationDirty = true;
+    clearInput();
+    return true;
+}
+
+void MelonInstance::clearInput()
+{
+    inputMask = 0xFFF;
+    touchState = 0;
 }
 
 void MelonInstance::stop()
@@ -469,7 +555,7 @@ void MelonInstance::releaseKey(u32 key)
         inputMask.fetch_or(1u << key);
 }
 
-void MelonInstance::applyFrameInput()
+void MelonInstance::applyFrameInput(bool useHarness)
 {
     u32 touch = touchState.load();
     FrameInput input {
@@ -482,7 +568,10 @@ void MelonInstance::applyFrameInput()
     };
 
     // The determinism harness may record this input or replace it with recorded input
-    determinismHarness.beforeFrame(nds, input);
+    if (inputHook)
+        inputHook(input);
+    else if (useHarness)
+        determinismHarness.beforeFrame(nds, input);
 
     nds->SetKeyMask(input.keyMask);
     if (input.touching)

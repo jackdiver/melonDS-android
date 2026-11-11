@@ -83,6 +83,12 @@ private:
 
 extern DeterminismHarness determinismHarness;
 
+// Set while a netplay session runs: the microphone must be silent (real mic input differs between devices)
+extern std::atomic<bool> forceSilentMic;
+
+// Debug: set while a determinism replay runs, so the frame limiter is skipped (replays run as fast as possible)
+extern std::atomic<bool> unthrottleForReplay;
+
 }
 
 #endif // DETERMINISMHARNESS_H

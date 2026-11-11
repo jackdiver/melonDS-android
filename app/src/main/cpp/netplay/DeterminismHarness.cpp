@@ -18,6 +18,8 @@ namespace MelonDSAndroid
 {
 
 DeterminismHarness determinismHarness;
+std::atomic<bool> forceSilentMic { false };
+std::atomic<bool> unthrottleForReplay { false };
 
 namespace
 {
@@ -88,7 +90,17 @@ void DeterminismHarness::applyInput(NDS* nds, const FrameInput& input)
 u64 DeterminismHarness::hashState(NDS* nds)
 {
     u64 h = kFnvOffset;
-    h = hashBytes(h, nds->MainRAM, nds->MainRAMMask + 1);
+    // Skip 16 bytes at 0x0216FF98 that the JIT leaves different on some devices (Android 17 S23 vs Android 13
+    // Odin). They never spread over 5000 frames, so the game does not read them. See docs/netplay-plan.md.
+    constexpr u32 kSkipStart = 0x16FF98, kSkipEnd = 0x16FFA8;
+    const u32 ramSize = nds->MainRAMMask + 1;
+    if (ramSize > kSkipEnd)
+    {
+        h = hashBytes(h, nds->MainRAM, kSkipStart);
+        h = hashBytes(h, nds->MainRAM + kSkipEnd, ramSize - kSkipEnd);
+    }
+    else
+        h = hashBytes(h, nds->MainRAM, ramSize);
     h = hashBytes(h, nds->SharedWRAM, nds->SharedWRAMSize);
     h = hashBytes(h, nds->ARM7WRAM, nds->ARM7WRAMSize);
     h = hashBytes(h, nds->ARM9.R, sizeof(nds->ARM9.R));

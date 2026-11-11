@@ -2,6 +2,7 @@
 #define MELONINSTANCE_H
 
 #include <atomic>
+#include <functional>
 #include <string>
 #include "Args.h"
 #include "Configuration.h"
@@ -20,6 +21,18 @@ using namespace melonDS;
 
 namespace MelonDSAndroid
 {
+
+// Points melonDS's per-thread "current console" at `nds` for the scope. The JIT (memory fault handling, invalidation)
+// acts on NDS::Current, so any work on a console from a thread that is not running it (reset, savestate load) must
+// set it, or it corrupts the console that thread normally runs.
+struct ScopedCurrentNds
+{
+    melonDS::NDS* previous;
+    explicit ScopedCurrentNds(melonDS::NDS* nds) : previous(melonDS::NDS::Current) { melonDS::NDS::Current = nds; }
+    ~ScopedCurrentNds() { melonDS::NDS::Current = previous; }
+    ScopedCurrentNds(const ScopedCurrentNds&) = delete;
+    ScopedCurrentNds& operator=(const ScopedCurrentNds&) = delete;
+};
 
 class MelonInstance
 {
@@ -41,6 +54,20 @@ public:
     void reset();
     melonDS::u32 runFrame();
     void stop();
+
+    // Netplay mirror support (see docs/netplay-plan.md)
+    // Runs one frame without touching OpenGL, saves, rewind or RetroAchievements. Safe on a non-GL thread.
+    melonDS::u32 runFrameHeadless();
+    // Turns this instance into an exact copy of `source` (cart + emulated state) and disables all save writes.
+    bool cloneFrom(MelonInstance& source);
+    // Neutral input (no keys, no touch)
+    void clearInput();
+    // When set, runFrame() displays this console's screens instead of its own (software renderer only)
+    void setPresentationSource(std::function<melonDS::NDS*()> source) { presentationSource = std::move(source); }
+    // When set, called with each frame's input before it is applied (may record it or replace it)
+    void setInputHook(std::function<void(FrameInput&)> hook) { inputHook = std::move(hook); }
+    melonDS::NDS* getNds() { return nds; }
+    Renderer getCurrentRenderer() const { return currentRenderer; }
 
     void updateMotionData(float ax, float ay, float az, float rx, float ry, float rz);
     float getMotionData(MotionQueryType type);
@@ -79,7 +106,7 @@ private:
     void updateRenderer();
     void setBatteryLevels();
     void setDateTime();
-    void applyFrameInput();
+    void applyFrameInput(bool useHarness = true);
     void saveRewindState(RewindSaveState* rewindSaveState);
 
 private:
@@ -102,6 +129,8 @@ private:
     std::atomic<u32> touchState;
     std::atomic<bool> lidClosed;
     bool appliedLidClosed;
+    std::function<melonDS::NDS*()> presentationSource;
+    std::function<void(FrameInput&)> inputHook;
 
     std::shared_ptr<EmulatorConfiguration> currentConfiguration;
     FrameQueue frameQueue;

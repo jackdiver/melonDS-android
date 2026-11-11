@@ -27,6 +27,7 @@
 #include "net/Net.h"
 #include "net/Net_Slirp.h"
 #include <fstream>
+#include "netplay/MirrorSession.h"
 
 namespace MelonDSAndroid
 {
@@ -39,6 +40,9 @@ namespace MelonDSAndroid
     std::shared_ptr<Net> net;
 
     std::shared_ptr<MelonInstance> instance;
+    MirrorSession mirrorSession;
+    std::atomic<int> pendingMirrorRequest { 0 }; // 1 = start, 2 = stop
+    int mirrorDebugFlags = 0; // DEBUG: 1 = mirror uses interpreter, 2 = run consoles one after the other
 
     bool setupOpenGlContext();
     void cleanupOpenGlContext();
@@ -166,28 +170,36 @@ namespace MelonDSAndroid
             return ROMManager::FIRMWARE_NOT_BOOTABLE;
     }
 
+    // Input goes to the focused console while a netplay mirror session runs
+    MelonInstance* inputTarget()
+    {
+        if (mirrorSession.isActive())
+            return mirrorSession.inputTarget();
+        return instance.get();
+    }
+
     void touchScreen(u16 x, u16 y)
     {
-        if (instance)
-            instance->touchScreen(x, y);
+        if (auto* target = inputTarget())
+            target->touchScreen(x, y);
     }
 
     void releaseScreen()
     {
-        if (instance)
-            instance->releaseScreen();
+        if (auto* target = inputTarget())
+            target->releaseScreen();
     }
 
     void pressKey(u32 key)
     {
-        if (instance)
-            instance->pressKey(key);
+        if (auto* target = inputTarget())
+            target->pressKey(key);
     }
 
     void releaseKey(u32 key)
     {
-        if (instance)
-            instance->releaseKey(key);
+        if (auto* target = inputTarget())
+            target->releaseKey(key);
     }
 
     void updateMotionData(float ax, float ay, float az, float rx, float ry, float rz)
@@ -204,8 +216,46 @@ namespace MelonDSAndroid
         instance->start();
     }
 
+    void handleMirrorRequest()
+    {
+        int request = pendingMirrorRequest.exchange(0);
+        if (request == 1 && !mirrorSession.isActive())
+        {
+            auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, 1);
+            if (!mirrorArgs.has_value())
+                return;
+            // DEBUG experiment switch: mirror on the interpreter
+            if (mirrorDebugFlags & 1)
+                mirrorArgs.value()->JIT = std::nullopt;
+            auto mirror = std::make_shared<MelonInstance>(
+                1,
+                currentConfiguration,
+                std::move(mirrorArgs.value()),
+                net,
+                std::make_unique<ScreenshotRenderer>(nullptr),
+                currentConfiguration->consoleType
+            );
+            mirrorSession.start(instance, mirror);
+        }
+        else if (request == 2)
+        {
+            mirrorSession.stop();
+        }
+    }
+
+    void requestMirrorStart(int debugFlags) { mirrorDebugFlags = debugFlags; mirrorSession.setDebugFlags(debugFlags); pendingMirrorRequest = 1; }
+    void requestMirrorStop() { pendingMirrorRequest = 2; }
+    void setMirrorFocus(int index) { mirrorSession.setFocus(index); }
+    void requestMirrorRecord(std::string directory) { mirrorSession.requestRecord(directory); }
+    void requestMirrorReplay(std::string directory, std::string tag) { mirrorSession.requestReplay(directory, tag); }
+    void requestMirrorRecordStop() { mirrorSession.requestStopRecording(); }
+
     u32 loop()
     {
+        handleMirrorRequest();
+        if (mirrorSession.isActive())
+            return mirrorSession.runFrame();
+
         MPInterface::Get().Process();
         return instance->runFrame();
     }
@@ -365,6 +415,7 @@ namespace MelonDSAndroid
 
     void stop()
     {
+        mirrorSession.stop();
         instance->stop();
         cleanupOpenGlContext();
     }

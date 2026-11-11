@@ -12,4 +12,12 @@ object MelonDSAndroidInterface {
     external fun determinismReplay(directory: String, tag: String)
     external fun determinismStop()
     external fun determinismSelfTest(frames: Int)
+
+    // Netplay phase 2 (debug): hidden second console in the same process
+    external fun mirrorStart(debugFlags: Int)
+    external fun mirrorStop()
+    external fun mirrorFocus(index: Int)
+    external fun mirrorRecord(directory: String)
+    external fun mirrorReplay(directory: String, tag: String)
+    external fun mirrorRecordStop()
 }

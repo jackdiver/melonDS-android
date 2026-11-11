@@ -59,6 +59,12 @@ class MelonDSApplication : Application(), Configuration.Provider {
                     "replay" -> MelonDSAndroidInterface.determinismReplay(dir, intent.getStringExtra("tag") ?: "replay")
                     "stop" -> MelonDSAndroidInterface.determinismStop()
                     "selftest" -> MelonDSAndroidInterface.determinismSelfTest(intent.getIntExtra("frames", 300))
+                    "mirror-start" -> MelonDSAndroidInterface.mirrorStart(intent.getIntExtra("debug", 0))
+                    "mirror-stop" -> MelonDSAndroidInterface.mirrorStop()
+                    "focus" -> MelonDSAndroidInterface.mirrorFocus(intent.getIntExtra("index", 0))
+                    "mirror-record" -> MelonDSAndroidInterface.mirrorRecord(dir)
+                    "mirror-replay" -> MelonDSAndroidInterface.mirrorReplay(dir, intent.getStringExtra("tag") ?: "replay")
+                    "mirror-recstop" -> MelonDSAndroidInterface.mirrorRecordStop()
                 }
             }
         }
