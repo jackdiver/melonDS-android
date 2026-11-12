@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 #include "types.h"
 #include "DeterminismHarness.h"
 
@@ -94,6 +95,9 @@ private:
     uint32_t recFrame = 0;
     std::string recDir;
     std::string recTag;
+    std::vector<std::string> refHashes;   // DEBUG capture
+    std::vector<uint32_t> dumpFrames;
+    int capturesWritten = 0;
 };
 
 }

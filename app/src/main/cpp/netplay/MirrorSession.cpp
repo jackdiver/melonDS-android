@@ -11,6 +11,7 @@
 #include <cstring>
 #include "ARM.h"
 #include <vector>
+#include <algorithm>
 
 #define TAG "NetplayMirror"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -366,44 +367,89 @@ void MirrorSession::inputHook(int index, FrameInput& input)
     }
 }
 
-// DEBUG (determinism investigation): dump console 0's main RAM around the first replayed frame
-static void dumpRam(NDS* nds, const std::string& path)
+// DEBUG (determinism investigation): main RAM, shared WRAM, ARM7 WRAM and both register files
+static void appendRam(NDS* nds, std::vector<u8>& out)
 {
-    FILE* f = fopen(path.c_str(), "wb");
-    if (!f) return;
-    fwrite(nds->MainRAM, 1, nds->MainRAMMask + 1, f);
-    fwrite(nds->SharedWRAM, 1, nds->SharedWRAMSize, f);
-    fwrite(nds->ARM7WRAM, 1, nds->ARM7WRAMSize, f);
-    fwrite(nds->ARM9.R, 1, sizeof(nds->ARM9.R), f);
-    fwrite(nds->ARM7.R, 1, sizeof(nds->ARM7.R), f);
-    fclose(f);
+    auto add = [&](const void* p, size_t n) { const u8* b = (const u8*) p; out.insert(out.end(), b, b + n); };
+    add(nds->MainRAM, nds->MainRAMMask + 1);
+    add(nds->SharedWRAM, nds->SharedWRAMSize);
+    add(nds->ARM7WRAM, nds->ARM7WRAMSize);
+    add(nds->ARM9.R, sizeof(nds->ARM9.R));
+    add(nds->ARM7.R, sizeof(nds->ARM7.R));
+    add(&nds->ARM9.CPSR, 4);
+    add(&nds->ARM7.CPSR, 4);
+    add(nds->ARM9.DTCM, melonDS::DTCMPhysicalSize);
+    add(nds->ARM9.R_FIQ, 80);
+    add(nds->ARM7.R_FIQ, 80);
 }
 
-// DEBUG: per-block ARM9 trace of both consoles during the first replayed frames
-static FILE* gTraceFile[2] = { nullptr, nullptr };
+static void writeFile(const std::string& path, const std::vector<u8>& data)
+{
+    if (FILE* f = fopen(path.c_str(), "wb")) { fwrite(data.data(), 1, data.size(), f); fclose(f); }
+}
+
+// DEBUG: per-block ARM9 trace of both consoles, kept in memory for the current frame only.
+// Record: block address, R0-R15, CPSR, banked registers (R_FIQ..R_UND, 20 words), 16 bytes at 0x0216FF98.
+static constexpr int kTraceWords = 1 + 16 + 1 + 20 + 4;
+static std::vector<u32> gTrace[2];
 static melonDS::ARM* gTraceCpu[2] = { nullptr, nullptr };
 static void traceHook(melonDS::ARM* cpu, u32 addr)
 {
     int i = cpu == gTraceCpu[0] ? 0 : cpu == gTraceCpu[1] ? 1 : -1;
-    if (i < 0 || !gTraceFile[i]) return;
-    u32 rec[22];
+    if (i < 0) return;
+    u32 rec[kTraceWords];
     rec[0] = addr;
     memcpy(&rec[1], cpu->R, 64);
     rec[17] = cpu->CPSR;
-    memcpy(&rec[18], cpu->NDS.MainRAM + 0x16FF98, 16);
-    fwrite(rec, 4, 22, gTraceFile[i]);
+    memcpy(&rec[18], cpu->R_FIQ, 80);
+    memcpy(&rec[38], cpu->NDS.MainRAM + 0x16FF98, 16);
+    gTrace[i].insert(gTrace[i].end(), rec, rec + kTraceWords);
+}
+
+static std::vector<std::string> readLines(const std::string& path)
+{
+    std::vector<std::string> lines;
+    if (FILE* f = fopen(path.c_str(), "r"))
+    {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), f))
+        {
+            std::string s(buf);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            lines.push_back(s);
+        }
+        fclose(f);
+    }
+    return lines;
 }
 
 u32 MirrorSession::runFrame()
 {
     handleRecordingRequest();
 
-    bool dumpThisFrame = recMode.load() != RecMode::Off && recFrame == 0;
-    std::string dumpSuffix = std::to_string(recFrame) + "-" + recTag;
-    if (dumpThisFrame)
+    // DEBUG capture: during replay, every frame is traced; the trace and pre/post RAM of a frame are written
+    // when its hashes differ from hashes-ref.txt (another device's run), or when it is listed in dumpframes.txt.
+    // Opt-in: only active when one of those files exists (it slows replays to ~8 fps).
+    if (recMode.load() == RecMode::Replay && recFrame == 0)
     {
-        dumpRam(primary->getNds(), recDir + "/ram0-pre-" + dumpSuffix + ".bin");
-        dumpRam(mirror->getNds(), recDir + "/ram1-pre-" + dumpSuffix + ".bin");
+        refHashes = readLines(recDir + "/hashes-ref.txt");
+        dumpFrames.clear();
+        for (const std::string& s : readLines(recDir + "/dumpframes.txt"))
+            if (!s.empty()) dumpFrames.push_back((uint32_t) strtoul(s.c_str(), nullptr, 10));
+        capturesWritten = 0;
+    }
+    bool capture = recMode.load() == RecMode::Replay && (!refHashes.empty() || !dumpFrames.empty());
+    std::vector<u8> pre[2];
+    if (capture)
+    {
+        MelonInstance* inst[2] = { primary.get(), mirror.get() };
+        for (int i = 0; i < 2; i++)
+        {
+            appendRam(inst[i]->getNds(), pre[i]);
+            gTraceCpu[i] = &inst[i]->getNds()->ARM9;
+            gTrace[i].clear();
+        }
+        melonDS::JitTraceHook9 = traceHook;
     }
 
     auto kickMirror = [this] {
@@ -414,18 +460,6 @@ u32 MirrorSession::runFrame()
         }
         cv.notify_all();
     };
-
-    bool traceThisFrame = recMode.load() == RecMode::Replay && recFrame < 3;
-    if (traceThisFrame && recFrame == 0)
-    {
-        MelonInstance* inst[2] = { primary.get(), mirror.get() };
-        for (int i = 0; i < 2; i++)
-        {
-            gTraceCpu[i] = &inst[i]->getNds()->ARM9;
-            gTraceFile[i] = fopen((recDir + "/trace9-" + std::to_string(i) + "-" + recTag + ".bin").c_str(), "wb");
-        }
-        melonDS::JitTraceHook9 = traceHook;
-    }
 
     // Consoles run one after the other: running them concurrently has a timing race that makes replays
     // unrepeatable (see docs/netplay-plan.md). DEBUG flag 32 brings back the concurrent mode.
@@ -441,36 +475,40 @@ u32 MirrorSession::runFrame()
         kickMirror();
     }
     waitForMirror();
-    if (traceThisFrame)
-    {
-        traceHook(gTraceCpu[0], 0xFFFFFFFF);
-        traceHook(gTraceCpu[1], 0xFFFFFFFF);
-    }
-    if (traceThisFrame && recFrame == 2)
-    {
+    if (capture)
         melonDS::JitTraceHook9 = nullptr;
-        for (FILE*& f : gTraceFile)
-            if (f) { fclose(f); f = nullptr; }
-    }
-
-    if (dumpThisFrame)
-    {
-        dumpRam(primary->getNds(), recDir + "/ram0-post-" + dumpSuffix + ".bin");
-        dumpRam(mirror->getNds(), recDir + "/ram1-post-" + dumpSuffix + ".bin");
-        // Full snapshot too, to diff per component
-        Savestate state;
-        if (!state.Error && primary->getNds()->DoSavestate(&state) && !state.Error)
-        {
-            FILE* f = fopen((recDir + "/state0-post-" + dumpSuffix + ".bin").c_str(), "wb");
-            if (f) { fwrite(state.Buffer(), 1, state.Length(), f); fclose(f); }
-        }
-    }
 
     if (recMode.load() != RecMode::Off && hashFile)
     {
-        fprintf(hashFile, "%u %016llx %016llx\n", recFrame,
-                (unsigned long long) DeterminismHarness::hashState(primary->getNds()),
-                (unsigned long long) DeterminismHarness::hashState(mirror->getNds()));
+        char line[128];
+        snprintf(line, sizeof(line), "%u %016llx %016llx", recFrame,
+                 (unsigned long long) DeterminismHarness::hashState(primary->getNds()),
+                 (unsigned long long) DeterminismHarness::hashState(mirror->getNds()));
+        fprintf(hashFile, "%s\n", line);
+
+        if (capture)
+        {
+            bool mismatch = recFrame < refHashes.size() && refHashes[recFrame] != line;
+            bool listed = std::find(dumpFrames.begin(), dumpFrames.end(), recFrame) != dumpFrames.end();
+            if ((mismatch && capturesWritten < 3) || listed)
+            {
+                if (mismatch) capturesWritten++;
+                MelonInstance* inst[2] = { primary.get(), mirror.get() };
+                std::string suffix = std::to_string(recFrame) + "-" + recTag + ".bin";
+                for (int i = 0; i < 2; i++)
+                {
+                    std::vector<u8> post;
+                    appendRam(inst[i]->getNds(), post);
+                    writeFile(recDir + "/ram" + std::to_string(i) + "-pre-" + suffix, pre[i]);
+                    writeFile(recDir + "/ram" + std::to_string(i) + "-post-" + suffix, post);
+                    const u8* t = (const u8*) gTrace[i].data();
+                    writeFile(recDir + "/trace9-" + std::to_string(i) + "-" + suffix,
+                              std::vector<u8>(t, t + gTrace[i].size() * 4));
+                }
+                LOGI("capture written for frame %u (%s)", recFrame, mismatch ? "hash mismatch" : "listed");
+            }
+        }
+
         recFrame++;
         if (replayEnded)
             stopRecording("end of recorded input");

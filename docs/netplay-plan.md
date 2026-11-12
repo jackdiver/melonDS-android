@@ -151,3 +151,17 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   0x0216FF98 no longer appear with the current build).
 - Test tooling: replays now skip the frame limiter and write `done-<tag>.txt` when finished; a frame-0..2
   per-block ARM9 trace hook (`melonDS::JitTraceHook9`) exists for debugging.
+
+### S23 one-frame blips: what we know (investigation parked)
+- The blips are not dead memory. Game code at 0x02146C24 (ARM9, IRQ mode) reloads R12 from a saved CPU
+  context at 0x0216FF98. On some runs that context holds a junk value (seen: 0x07FFBB50, 0x0009A000, 0x666)
+  and the other device holds zeros. It is not always the S23 that has the junk.
+- Everything the savestate covers is identical after loading, so the junk most likely comes from state that
+  neither Reset nor the savestate covers and that leaks in from what the console ran before the snapshot was
+  loaded (or from a JIT path that writes a host value into a guest register).
+- The state hash now covers all of main RAM again (no skip), plus DTCM (ARM9 stack) and banked registers.
+- Tooling left in place: reference-driven capture (push another device's `hashes-ref.txt` or a
+  `dumpframes.txt` into files/netplay-test; opt-in, ~8 fps while active).
+- Mitigation for Phase 3: desync detection by periodic hash exchange plus resync (host sends a full state).
+  When starting a session, both sides should load the snapshot into a freshly created console, not one that
+  ran something else first.

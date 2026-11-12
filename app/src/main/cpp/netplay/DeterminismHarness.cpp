@@ -90,19 +90,14 @@ void DeterminismHarness::applyInput(NDS* nds, const FrameInput& input)
 u64 DeterminismHarness::hashState(NDS* nds)
 {
     u64 h = kFnvOffset;
-    // Skip 16 bytes at 0x0216FF98 that the JIT leaves different on some devices (Android 17 S23 vs Android 13
-    // Odin). They never spread over 5000 frames, so the game does not read them. See docs/netplay-plan.md.
-    constexpr u32 kSkipStart = 0x16FF98, kSkipEnd = 0x16FFA8;
-    const u32 ramSize = nds->MainRAMMask + 1;
-    if (ramSize > kSkipEnd)
-    {
-        h = hashBytes(h, nds->MainRAM, kSkipStart);
-        h = hashBytes(h, nds->MainRAM + kSkipEnd, ramSize - kSkipEnd);
-    }
-    else
-        h = hashBytes(h, nds->MainRAM, ramSize);
+    // Hash all of main RAM. (An earlier version skipped 16 bytes at 0x0216FF98; they turned out to be a saved
+    // CPU context the game reads back, so differences there are real. See docs/netplay-plan.md.)
+    h = hashBytes(h, nds->MainRAM, nds->MainRAMMask + 1);
     h = hashBytes(h, nds->SharedWRAM, nds->SharedWRAMSize);
     h = hashBytes(h, nds->ARM7WRAM, nds->ARM7WRAMSize);
+    h = hashBytes(h, nds->ARM9.DTCM, melonDS::DTCMPhysicalSize);          // ARM9 stack
+    h = hashBytes(h, nds->ARM9.R_FIQ, 20 * sizeof(u32));                   // banked registers + SPSRs
+    h = hashBytes(h, nds->ARM7.R_FIQ, 20 * sizeof(u32));
     h = hashBytes(h, nds->ARM9.R, sizeof(nds->ARM9.R));
     h = hashBytes(h, &nds->ARM9.CPSR, sizeof(nds->ARM9.CPSR));
     h = hashBytes(h, nds->ARM7.R, sizeof(nds->ARM7.R));
