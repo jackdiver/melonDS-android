@@ -249,6 +249,9 @@ namespace MelonDSAndroid
     void requestMirrorRecord(std::string directory) { mirrorSession.requestRecord(directory); }
     void requestMirrorReplay(std::string directory, std::string tag) { mirrorSession.requestReplay(directory, tag); }
     void requestMirrorRecordStop() { mirrorSession.requestStopRecording(); }
+    void requestNetHost(int port, int inputDelay) { mirrorSession.requestNetHost(port, inputDelay); }
+    void requestNetJoin(std::string address, int port, int inputDelay) { mirrorSession.requestNetJoin(address, port, inputDelay); }
+    void requestNetStop() { mirrorSession.requestNetStop(); }
 
     u32 loop()
     {

@@ -106,6 +106,24 @@ Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorRecordStop(JNIEnv* env, job
 }
 
 JNIEXPORT void JNICALL
+Java_me_magnum_melonds_MelonDSAndroidInterface_netHost(JNIEnv* env, jobject thiz, jint port, jint inputDelay)
+{
+    MelonDSAndroid::requestNetHost(port, inputDelay);
+}
+
+JNIEXPORT void JNICALL
+Java_me_magnum_melonds_MelonDSAndroidInterface_netJoin(JNIEnv* env, jobject thiz, jstring address, jint port, jint inputDelay)
+{
+    MelonDSAndroid::requestNetJoin(jstringToString(env, address), port, inputDelay);
+}
+
+JNIEXPORT void JNICALL
+Java_me_magnum_melonds_MelonDSAndroidInterface_netStop(JNIEnv* env, jobject thiz)
+{
+    MelonDSAndroid::requestNetStop();
+}
+
+JNIEXPORT void JNICALL
 Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorFocus(JNIEnv* env, jobject thiz, jint index)
 {
     MelonDSAndroid::setMirrorFocus(index);

@@ -65,6 +65,9 @@ class MelonDSApplication : Application(), Configuration.Provider {
                     "mirror-record" -> MelonDSAndroidInterface.mirrorRecord(dir)
                     "mirror-replay" -> MelonDSAndroidInterface.mirrorReplay(dir, intent.getStringExtra("tag") ?: "replay")
                     "mirror-recstop" -> MelonDSAndroidInterface.mirrorRecordStop()
+                    "net-host" -> MelonDSAndroidInterface.netHost(intent.getIntExtra("port", 7064), intent.getIntExtra("delay", 4))
+                    "net-join" -> MelonDSAndroidInterface.netJoin(intent.getStringExtra("ip") ?: "", intent.getIntExtra("port", 7064), intent.getIntExtra("delay", 4))
+                    "net-stop" -> MelonDSAndroidInterface.netStop()
                 }
             }
         }

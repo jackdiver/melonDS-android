@@ -68,6 +68,9 @@ namespace MelonDSAndroid {
     extern void requestMirrorRecord(std::string directory);
     extern void requestMirrorReplay(std::string directory, std::string tag);
     extern void requestMirrorRecordStop();
+    extern void requestNetHost(int port, int inputDelay);
+    extern void requestNetJoin(std::string address, int port, int inputDelay);
+    extern void requestNetStop();
     extern Frame* getPresentationFrame(std::optional<std::chrono::time_point<std::chrono::steady_clock>> deadline);
     extern void pause();
     extern void resume();

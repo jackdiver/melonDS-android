@@ -58,6 +58,7 @@ add_library(
         ${ANDROID-CPP}/netplay/DeterminismHarness.cpp
         ${ANDROID-CPP}/netplay/DeterministicMP.cpp
         ${ANDROID-CPP}/netplay/MirrorSession.cpp
+        ${ANDROID-CPP}/netplay/NetplayLink.cpp
         ${ANDROID-CPP}/performancehint/JniPerformanceHintManager.cpp
         ${ANDROID-CPP}/performancehint/NdkPerformanceHintManager.cpp
         ${ANDROID-CPP}/performancehint/PerformanceHintManagerFactory.cpp
@@ -74,4 +75,4 @@ target_include_directories(melonDS-android-frontend PUBLIC
         ${FAAD2}/include
         ${RCHEEVOS}/include
 )
-target_link_libraries(melonDS-android-frontend android core net-utils oboe faad enet rcheevos EGL GLESv3)
+target_link_libraries(melonDS-android-frontend android core net-utils oboe faad enet rcheevos EGL GLESv3 z)

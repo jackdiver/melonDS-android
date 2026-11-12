@@ -165,3 +165,14 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - Mitigation for Phase 3: desync detection by periodic hash exchange plus resync (host sends a full state).
   When starting a session, both sides should load the snapshot into a freshly created console, not one that
   ran something else first.
+
+#### Phase 3 progress (2026-11-12) — first network session works
+- Debug commands: `net-host --ei delay N` (S23), `net-join --es ip 192.168.0.4 --ei delay N` (Odin), `net-stop`,
+  after `mirror-start` on both. Host = console 0, joiner = console 1 (joiner's screen follows console 1).
+- Start-up: host snapshots both consoles, reloads them fresh, sends both states zlib-compressed
+  (2 x 19.5 MB raw -> 4.9 MB); joiner loads them fresh. Inputs go unreliable with 16-frame redundancy, input
+  delay 4 frames; state hashes are compared every 60 frames.
+- First idle run over home Wi-Fi: connected, synced, ran ~1800 frames; all hash checks after frame 0 in sync.
+  One mismatch at frame 0 (console 0) that did not persist. The S23 is the slower side (~55 fps with two
+  consoles), so the Odin waits ~25% of the time.
+- Not done yet: resync on desync, playing a real cup (gate), UI.

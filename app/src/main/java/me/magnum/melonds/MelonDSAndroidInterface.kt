@@ -20,4 +20,9 @@ object MelonDSAndroidInterface {
     external fun mirrorRecord(directory: String)
     external fun mirrorReplay(directory: String, tag: String)
     external fun mirrorRecordStop()
+
+    // Netplay phase 3 (debug): two devices over the network
+    external fun netHost(port: Int, inputDelay: Int)
+    external fun netJoin(address: String, port: Int, inputDelay: Int)
+    external fun netStop()
 }
