@@ -8,6 +8,7 @@
 #include <time.h>
 #include <chrono>
 #include <zlib.h>
+#include <sys/stat.h>
 #include "MelonInstance.h"
 #include "net/MPInterface.h"
 #include "Savestate.h"
@@ -750,6 +751,8 @@ void MirrorSession::netEnd(const char* reason)
         net.reset();
     }
     netPhase = NetPhase::Off;
+    for (FILE*& f : netRecInputs)
+        if (f) { fclose(f); f = nullptr; }
 }
 
 bool MirrorSession::saveStateTo(int index, std::vector<uint8_t>& out)
@@ -790,6 +793,7 @@ bool MirrorSession::netSyncAsHost()
     for (int i = 0; i < 2; i++)
         if (!loadStateFresh(i, states[i].data(), states[i].size()))
             return false;
+    netRecordStates(states[0].data(), states[0].size(), states[1].data(), states[1].size());
     installLink();
 
     // Savestates are mostly zeros: compress (39 MB raw -> a few MB)
@@ -939,6 +943,7 @@ bool MirrorSession::netBeforeFrame()
                 netEnd("bad state from host");
                 return false;
             }
+            netRecordStates(p, len0, p + len0, len1);
             netStateRx.clear();
             installLink();
             setFocus(1);
@@ -971,6 +976,7 @@ bool MirrorSession::netBeforeFrame()
         netRemoteHashes.clear();
         netDesyncs = netHashChecks = 0;
         netStallMs = 0;
+        netRecordOpenInputs();
         netPhase = NetPhase::Running;
         LOGI("netplay: running (%s, console %d is local)", netIsHost ? "host" : "client", netLocalIndex);
     }
@@ -1030,6 +1036,8 @@ void MirrorSession::netInputHook(int index, FrameInput& input)
         const InputSlot& slot = netRemote[netFrame % kInputRing];
         input = slot.frame == netFrame ? slot.input : kNeutralInput;
     }
+    if (netRecInputs[index])
+        fwrite(&input, sizeof(FrameInput), 1, netRecInputs[index]);
 }
 
 void MirrorSession::netAfterFrame()
@@ -1092,5 +1100,30 @@ std::string MirrorSession::netStatus()
     }
     std::lock_guard<std::mutex> lock(netRequestMutex);
     return std::string(phase) + " " + std::to_string(netFrameShown.load()) + " " + std::to_string(netDesyncsShown.load()) + " " + netMessage;
+}
+}
+
+namespace MelonDSAndroid
+{
+// Every netplay session is recorded (start states + the inputs each console received) into <netRecDir>/netrec,
+// in the same layout as mirror-record, so a session can be replayed offline with mirror-replay.
+void MirrorSession::netRecordStates(const uint8_t* s0, size_t n0, const uint8_t* s1, size_t n1)
+{
+    if (netRecDir.empty()) return;
+    std::string dir = netRecDir + "/netrec";
+    mkdir(dir.c_str(), 0700);
+    const uint8_t* data[2] = { s0, s1 };
+    size_t size[2] = { n0, n1 };
+    for (int i = 0; i < 2; i++)
+        if (FILE* f = fopen((dir + "/state" + std::to_string(i) + ".bin").c_str(), "wb")) { fwrite(data[i], 1, size[i], f); fclose(f); }
+}
+
+void MirrorSession::netRecordOpenInputs()
+{
+    for (FILE*& f : netRecInputs)
+        if (f) { fclose(f); f = nullptr; }
+    if (netRecDir.empty()) return;
+    for (int i = 0; i < 2; i++)
+        netRecInputs[i] = fopen((netRecDir + "/netrec/inputs" + std::to_string(i) + ".bin").c_str(), "wb");
 }
 }

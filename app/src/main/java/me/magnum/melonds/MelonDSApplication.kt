@@ -50,6 +50,7 @@ class MelonDSApplication : Application(), Configuration.Provider {
      */
     private fun registerDeterminismTestReceiver() {
         if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+        MelonDSAndroidInterface.setNetRecordDir(java.io.File(filesDir, "netplay-test").apply { mkdirs() }.absolutePath)
 
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: android.content.Context, intent: android.content.Intent) {

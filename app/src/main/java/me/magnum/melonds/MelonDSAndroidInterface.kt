@@ -27,4 +27,6 @@ object MelonDSAndroidInterface {
     external fun netStop()
     // "<phase> <frame> <desyncs> <message>"; phase is off|waiting|connecting|syncing|running|error
     external fun netStatus(): String
+    // Debug: record every netplay session (start states + inputs) into <dir>/netrec
+    external fun setNetRecordDir(directory: String)
 }

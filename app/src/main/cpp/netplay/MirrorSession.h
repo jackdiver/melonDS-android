@@ -54,6 +54,7 @@ public:
     void requestNetStop();
     // Thread-safe summary for the UI: "<phase> <frame> <desyncs> <message>"
     std::string netStatus();
+    void setNetRecordDir(const std::string& dir) { netRecDir = dir; }
 
     void setDebugFlags(int flags) { debugFlags = flags; }
     void setFocus(int index);
@@ -88,6 +89,8 @@ private:
     bool saveStateTo(int index, std::vector<uint8_t>& out);
     bool loadStateFresh(int index, const uint8_t* data, size_t size);
     uint32_t romHash();
+    void netRecordStates(const uint8_t* s0, size_t n0, const uint8_t* s1, size_t n1);
+    void netRecordOpenInputs();
 
     std::shared_ptr<MelonInstance> primary;
     std::shared_ptr<MelonInstance> mirror;
@@ -146,6 +149,8 @@ private:
     std::atomic<uint32_t> netFrameShown { 0 };
     std::atomic<uint32_t> netDesyncsShown { 0 };
     std::string netMessage; // last end reason or error (netRequestMutex)
+    std::string netRecDir;
+    FILE* netRecInputs[2] = { nullptr, nullptr };
 
     std::vector<std::string> refHashes;   // DEBUG capture
     std::vector<uint32_t> dumpFrames;

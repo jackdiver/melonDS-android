@@ -131,6 +131,7 @@ private:
 
     uint32_t statWaits[2] = {0, 0};
     double statWaitMs[2] = {0, 0};
+    uint32_t statForced[2] = {0, 0};
 };
 
 }

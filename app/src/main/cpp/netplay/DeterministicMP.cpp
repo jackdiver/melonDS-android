@@ -194,6 +194,10 @@ bool DeterministicMP::waitFor(std::unique_lock<std::mutex>& lock, int inst, uint
         }
         if (me.forced || shuttingDown)
         {
+            if (me.forced && inst < 2 && ++statForced[inst] <= 400)
+                LOGI("forced release: inst %d at %llu (deadline %llu, other published %llu, other state %d)", inst,
+                     (unsigned long long) (instances[inst].nds->GetSysClockCycles(0) - instances[inst].base), (unsigned long long) deadline,
+                     (unsigned long long) instances[1 - inst].published, (int) instances[1 - inst].state);
             me.forced = false;
             me.state = State::Running;
             changedLocked();
@@ -408,7 +412,10 @@ int DeterministicMP::RecvHostPacket(int inst, u8* data, u64* timestamp)
             return instances[host].published >= t || instances[host].endTime != UINT64_MAX;
         });
         if (instances[host].endTime <= t)
+        {
+            LOGI("inst %d: host %d left at %llu (now %llu)", inst, host, (unsigned long long) instances[host].endTime, (unsigned long long) t);
             return -1;
+        }
     }
 
     uint64_t deadline = t + kHostPacketTimeout;

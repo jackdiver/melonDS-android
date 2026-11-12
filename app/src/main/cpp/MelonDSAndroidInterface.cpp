@@ -123,6 +123,12 @@ Java_me_magnum_melonds_MelonDSAndroidInterface_netStop(JNIEnv* env, jobject thiz
     MelonDSAndroid::requestNetStop();
 }
 
+JNIEXPORT void JNICALL
+Java_me_magnum_melonds_MelonDSAndroidInterface_setNetRecordDir(JNIEnv* env, jobject thiz, jstring directory)
+{
+    MelonDSAndroid::setNetRecordDir(jstringToString(env, directory));
+}
+
 JNIEXPORT jstring JNICALL
 Java_me_magnum_melonds_MelonDSAndroidInterface_netStatus(JNIEnv* env, jobject thiz)
 {

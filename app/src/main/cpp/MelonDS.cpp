@@ -254,6 +254,7 @@ namespace MelonDSAndroid
     void requestNetHost(int port, int inputDelay) { mirrorSession.requestNetHost(port, inputDelay); }
     void requestNetJoin(std::string address, int port, int inputDelay) { mirrorSession.requestNetJoin(address, port, inputDelay); }
     void requestNetStop() { mirrorSession.requestNetStop(); }
+    void setNetRecordDir(std::string dir) { mirrorSession.setNetRecordDir(dir); }
     std::string getNetStatus()
     {
         if (mirrorStartFailed)

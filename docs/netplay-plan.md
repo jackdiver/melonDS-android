@@ -218,3 +218,10 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - Default input delay lowered from 4 to 2 frames (~33 ms).
 - Played session with the Odin hosting (2026-11-12): ~10 min / 34,700 frames, 580 checks, 0 desyncs;
   ~8-9 ms per frame on both phones (full 60 fps with headroom); total stall ~1.5% of the time. Lag "feels better".
+
+#### Join failure / freeze investigation (2026-11-12)
+- Every netplay session is recorded (debug builds) to files/netplay-test/netrec: start states + the inputs each
+  console received, replayable with mirror-replay. The link logs forced releases and "host left" events.
+- A failed join (S23 joining an Odin-hosted group) happened once; a later attempt joined fine. Replaying the
+  good session with the joiner's taps shifted by -60..+60 frames (13 variants) always joined, so tap timing is
+  not the trigger. Not yet reproduced; the freeze after a cup also still needs a recorded occurrence.
