@@ -39,6 +39,7 @@ class LocalMultiplayerController(
         const val LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
         const val PERMISSION_REQUEST = 7064
         const val POLL_MS = 500L
+        const val MAC_CHANGED = "MAC_CHANGED"
     }
 
     private data class Status(val phase: String, val frame: Long, val desyncs: Long, val message: String)
@@ -187,7 +188,8 @@ class LocalMultiplayerController(
             "hosting" -> "Your game created a group: waiting for another device to look for groups"
             "searching" -> "Your game is looking for groups: searching the Wi-Fi network for a host"
             "joining" -> "Another device is joining..."
-            "idle" -> if (status.message.isNotEmpty()) status.message else "Not connected. Create or look for a group in the game, or use Host / Join below."
+            "idle" -> if (status.message.startsWith(MAC_CHANGED)) "This device got a new wireless ID. Leave the multiplayer menu and open it again to join."
+                else if (status.message.isNotEmpty()) status.message else "Not connected. Create or look for a group in the game, or use Host / Join below."
             "waiting" -> "Hosting: waiting for the other player to join"
             "connecting" -> "Connecting to the host..."
             "syncing" -> "Connected, starting the session..."
@@ -212,10 +214,25 @@ class LocalMultiplayerController(
                     toast(if (new.message.isNotEmpty()) "Wi-Fi multiplayer ended: ${new.message}" else "Wi-Fi multiplayer ended")
             }
         }
-        if (new.message.isNotEmpty() && new.message != old.message && new.phase != "running" && old.phase != "running")
+        if (new.message.startsWith(MAC_CHANGED) && new.message != old.message) {
+            saveNewMacAddress(new.message.removePrefix(MAC_CHANGED).trim())
+            toast("This device had the same wireless ID as the other one, so it got a new one. Leave the multiplayer menu and open it again to join.")
+        } else if (new.message.isNotEmpty() && new.message != old.message && new.phase != "running" && old.phase != "running")
             toast(new.message)
         if (new.phase == "running" && old.desyncs == 0L && new.desyncs > 0)
             toast("The two devices are out of sync") // once per session
+    }
+
+    /**
+     * The native side changed this console's MAC address because it clashed with the other device's. Keep it for
+     * future launches (only used with the built-in firmware; a firmware dump keeps its own MAC and the clash is
+     * fixed again the same way next time).
+     */
+    private fun saveNewMacAddress(address: String) {
+        if (!Regex("^([0-9A-F]{2}:){5}[0-9A-F]{2}$").matches(address)) return
+        activity.getSharedPreferences("${activity.packageName}_preferences", Context.MODE_PRIVATE).edit {
+            putString("internal_mac_address", address)
+        }
     }
 
     private fun ensureLocalNetworkPermissionOnce() {

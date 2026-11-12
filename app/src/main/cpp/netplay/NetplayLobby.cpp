@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <random>
 #include "MelonInstance.h"
 #include "NDS.h"
 #include "NDSCart.h"
@@ -194,6 +195,7 @@ void NetplayLobby::reset()
     receivedPacket.clear();
     ownState.clear();
     ownFirmware.clear();
+    rejectUntilMs = 0;
     setPhase(Phase::Idle);
 }
 
@@ -305,8 +307,9 @@ void NetplayLobby::sendHello(NDS* nds)
     link->flush();
 }
 
-bool NetplayLobby::checkHello(NDS* nds, const uint8_t* data, size_t size, std::string& error)
+bool NetplayLobby::checkHello(NDS* nds, const uint8_t* data, size_t size, std::string& error, bool& macClash)
 {
+    macClash = false;
     const uint8_t* p = data + 1;
     const uint8_t* end = data + size;
     GameId theirs;
@@ -335,6 +338,7 @@ bool NetplayLobby::checkHello(NDS* nds, const uint8_t* data, size_t size, std::s
     const auto& ourMac = nds->GetFirmware().GetHeader().MacAddr;
     if (memcmp(mac, ourMac.data(), 6) == 0)
     {
+        macClash = true;
         error = "both devices have the same MAC address; change one in Settings > Firmware";
         return false;
     }
@@ -391,6 +395,8 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
     bool beaconing = lastBeacon != 0 && now - lastBeacon < kBeaconTimeoutMs;
     bool searching = mp->wirelessOn.load() && !beaconing && now - mp->beginMs.load() > kScanDelayMs;
     uint32_t gameCode = gameIdOf(nds).gameCode;
+    if (macChangePending && !mp->wirelessOn.load())
+        macChangePending = false; // radio off: the next time it comes on, the game uses the new MAC
 
     auto receive = [this](std::vector<uint8_t>& out) {
         out.clear();
@@ -419,7 +425,7 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
             setPhase(Phase::Hosting);
             LOGI("game created a group: hosting");
         }
-        else if (searching && softwareRenderer)
+        else if (searching && softwareRenderer && !macChangePending)
         {
             if (!openUdp(true))
                 return Action::RunFrame;
@@ -439,6 +445,16 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
             return Action::RunFrame;
         }
         advertise(gameCode);
+        if (rejectUntilMs != 0)
+        {
+            link->service(0, [](const uint8_t*, size_t) {});
+            if (now >= rejectUntilMs)
+            {
+                rejectUntilMs = 0;
+                reset();
+            }
+            return Action::RunFrame;
+        }
         NetplayLink::Event ev = receive(receivedPacket);
         if (ev == NetplayLink::Event::Disconnected)
         {
@@ -449,14 +465,17 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
         if (!receivedPacket.empty() && receivedPacket[0] == MsgHello)
         {
             std::string error;
-            if (!checkHello(nds, receivedPacket.data(), receivedPacket.size(), error))
+            bool macClash = false;
+            if (!checkHello(nds, receivedPacket.data(), receivedPacket.size(), error, macClash))
             {
-                setMessage(error);
-                std::vector<uint8_t> msg { MsgReject };
+                // A MAC clash is fixed by the joiner (it picks a new MAC), so it is not an error here
+                setMessage(macClash ? "" : error);
+                std::vector<uint8_t> msg { MsgReject, (uint8_t) (macClash ? 1 : 0) };
                 msg.insert(msg.end(), error.begin(), error.end());
                 link->send(msg.data(), msg.size(), true);
                 link->flush();
-                reset();
+                // Keep the connection open briefly so the rejection actually reaches the joiner
+                rejectUntilMs = now + 1000;
                 return Action::RunFrame;
             }
             if (!snapshot(nds, ownState, ownFirmware))
@@ -507,15 +526,20 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
         NetplayLink::Event ev = receive(receivedPacket);
         if (ev == NetplayLink::Event::Connected)
             sendHello(nds);
-        if (ev == NetplayLink::Event::Disconnected || (!link->isConnected() && now - lastConnectMs > kConnectTimeoutMs))
+        // (a rejection can arrive together with the disconnect: handle it first)
+        if ((ev == NetplayLink::Event::Disconnected && receivedPacket.empty()) || (!link->isConnected() && receivedPacket.empty() && now - lastConnectMs > kConnectTimeoutMs))
         {
             link.reset();
             return Action::RunFrame;
         }
         if (!receivedPacket.empty() && receivedPacket[0] == MsgReject)
         {
-            setMessage(std::string(receivedPacket.begin() + 1, receivedPacket.end()));
-            link.reset();
+            bool macClash = receivedPacket.size() > 1 && receivedPacket[1] == 1;
+            if (macClash)
+                changeOwnMac(nds);
+            else
+                setMessage(std::string(receivedPacket.begin() + std::min<size_t>(2, receivedPacket.size()), receivedPacket.end()));
+            reset();
             return Action::RunFrame;
         }
         if (!receivedPacket.empty() && receivedPacket[0] == MsgState)
@@ -579,4 +603,28 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
     return Action::RunFrame;
 }
 
+}
+
+namespace MelonDSAndroid
+{
+// Both consoles had the same MAC address (e.g. the same firmware dump on both devices): this device, the joiner,
+// takes a new random one. The game reads the MAC when it turns its radio on, so the player has to leave the
+// multiplayer menu and open it again; the frontend saves the new MAC so it sticks (see LocalMultiplayerController).
+void NetplayLobby::changeOwnMac(NDS* nds)
+{
+    std::random_device random;
+    ScopedCurrentNds guard(nds);
+    Firmware& fw = nds->GetFirmware();
+    auto& mac = fw.GetHeader().MacAddr;
+    mac[0] = 0x00; mac[1] = 0x09; mac[2] = 0xBF; // Nintendo prefix, like the app's own random addresses
+    for (int i = 3; i < 6; i++)
+        mac[i] = (uint8_t) (random() & 0xFF);
+    fw.UpdateChecksums();
+    macChangePending = true;
+
+    char text[64];
+    snprintf(text, sizeof(text), "MAC_CHANGED %02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    setMessage(text);
+    LOGI("same MAC as the host: changed this console's MAC (%s)", text + 12);
+}
 }

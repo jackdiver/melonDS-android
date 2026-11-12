@@ -239,3 +239,9 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - The two devices need different MAC addresses (the Odin was changed to ...:AF:57).
 - Test automation: `press` debug command injects DS keys/touch inside the emulator for N frames.
 - Verified on S23 + Odin: group appears in the joiner's list, first join works, sessions stay in sync.
+- MAC clashes are handled automatically: the host rejects the joiner with a "MAC clash" code (keeping the connection
+  open 1 s so the message arrives), the joiner picks a random 00:09:BF:xx:xx:xx MAC, patches its firmware, waits
+  until the game turns its radio off and on (player reopens the multiplayer menu), and the app saves the new MAC
+  (built-in firmware). Verified S23 + Odin with a forced clash (2026-11-12).
+- Open: in that verified run, console 1 (the joiner) differed at the first three hash checks (frames 0-120) and was
+  in sync afterwards; its firmware and start state were identical on both devices. Not seen without a clash.
