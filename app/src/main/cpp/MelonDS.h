@@ -62,12 +62,9 @@ namespace MelonDSAndroid {
     extern void start();
     extern u32 loop();
     // Netplay phase 2 (debug): second console in the same process, see docs/netplay-plan.md
-    extern void requestMirrorStart();
-    extern void requestMirrorStop();
-    extern void requestNetHost(int port, int inputDelay);
-    extern void requestNetJoin(std::string address, int port, int inputDelay);
     extern void requestNetStop();
     extern std::string getNetStatus();
+    extern void servicePausedNetplay();
     extern Frame* getPresentationFrame(std::optional<std::chrono::time_point<std::chrono::steady_clock>> deadline);
     extern void pause();
     extern void resume();

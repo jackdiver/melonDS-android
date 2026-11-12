@@ -42,7 +42,6 @@ namespace MelonDSAndroid
 
     std::shared_ptr<MelonInstance> instance;
     MirrorSession mirrorSession;
-    std::atomic<int> pendingMirrorRequest { 0 }; // 1 = start, 2 = stop
 
     bool setupOpenGlContext();
     void cleanupOpenGlContext();
@@ -216,7 +215,6 @@ namespace MelonDSAndroid
         instance->start();
     }
 
-    std::atomic<bool> mirrorStartFailed { false };
     NetplayLobby lobby;
 
     std::shared_ptr<MelonInstance> makeMirrorInstance()
@@ -234,39 +232,22 @@ namespace MelonDSAndroid
         );
     }
 
-    void handleMirrorRequest()
-    {
-        int request = pendingMirrorRequest.exchange(0);
-        if (request == 1 && !mirrorSession.isActive())
-        {
-            auto mirror = makeMirrorInstance();
-            if (!mirror)
-                return;
-            mirrorStartFailed = !mirrorSession.start(instance, mirror);
-        }
-        else if (request == 2)
-        {
-            mirrorSession.stop();
-        }
-    }
-
-    void requestMirrorStart() { mirrorStartFailed = false; pendingMirrorRequest = 1; }
-    void requestMirrorStop() { pendingMirrorRequest = 2; }
-    void requestNetHost(int port, int inputDelay) { mirrorSession.requestNetHost(port, inputDelay); }
-    void requestNetJoin(std::string address, int port, int inputDelay) { mirrorSession.requestNetJoin(address, port, inputDelay); }
     void requestNetStop() { mirrorSession.requestNetStop(); }
     std::string getNetStatus()
     {
-        if (mirrorStartFailed)
-            return "error 0 0 Local multiplayer needs the software video renderer (Settings > Video)";
         if (mirrorSession.isActive())
             return mirrorSession.netStatus();
         return lobby.status();
     }
 
+    void servicePausedNetplay()
+    {
+        if (mirrorSession.isActive())
+            mirrorSession.servicePaused();
+    }
+
     u32 loop()
     {
-        handleMirrorRequest();
         if (mirrorSession.shouldEnd())
             mirrorSession.stop(); // lobby-started session over: back to this device's own console only
         if (mirrorSession.isActive())

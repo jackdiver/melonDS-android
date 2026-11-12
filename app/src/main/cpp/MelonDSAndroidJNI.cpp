@@ -631,7 +631,15 @@ void* emulate(void*)
         if (paused) {
             isThreadReallyPaused = true;
             while (paused && !stop)
-                pthread_cond_wait(&emuThreadCond, &emuThreadMutex);
+            {
+                // Wake up regularly so a running netplay session keeps answering the other device while paused
+                timespec until;
+                clock_gettime(CLOCK_REALTIME, &until);
+                until.tv_nsec += 50 * 1000 * 1000;
+                if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
+                if (pthread_cond_timedwait(&emuThreadCond, &emuThreadMutex, &until) != 0)
+                    MelonDSAndroid::servicePausedNetplay();
+            }
 
             frameLimitError = 0;
             lastTick = getCurrentMillis();

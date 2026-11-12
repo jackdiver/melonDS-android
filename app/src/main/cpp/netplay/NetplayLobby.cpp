@@ -377,6 +377,15 @@ bool NetplayLobby::readState(const uint8_t* data, size_t size, std::vector<uint8
     return true;
 }
 
+// Hello, state and reject packets (letters) matter to the lobby; the other device may already be sending session
+// input packets (numbers), and a batch can hold several packets: never let an input packet displace a control one.
+static void keepPacket(std::vector<uint8_t>& kept, const uint8_t* data, size_t size)
+{
+    auto isControl = [](const uint8_t* d, size_t s) { return s > 0 && (d[0] == 'H' || d[0] == 'S' || d[0] == 'R'); };
+    if (kept.empty() || (isControl(data, size) && !isControl(kept.data(), kept.size())))
+        kept.assign(data, data + size);
+}
+
 NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRenderer)
 {
     installMp();
@@ -389,7 +398,7 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
 
     auto receive = [this](std::vector<uint8_t>& out) {
         out.clear();
-        return link->service(0, [&](const uint8_t* d, size_t s) { if (out.empty()) out.assign(d, d + s); });
+        return link->service(0, [&](const uint8_t* d, size_t s) { keepPacket(out, d, s); });
     };
 
     switch (phase)
@@ -557,7 +566,7 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
         NetplayLink::Event ev = NetplayLink::Event::None;
         receivedPacket.clear();
         for (int i = 0; i < 4 && receivedPacket.empty() && ev != NetplayLink::Event::Disconnected; i++)
-            ev = link->service(4, [&](const uint8_t* d, size_t s) { if (receivedPacket.empty()) receivedPacket.assign(d, d + s); });
+            ev = link->service(4, [&](const uint8_t* d, size_t s) { keepPacket(receivedPacket, d, s); });
         if (ev == NetplayLink::Event::Disconnected)
         {
             setMessage("the other device disconnected");

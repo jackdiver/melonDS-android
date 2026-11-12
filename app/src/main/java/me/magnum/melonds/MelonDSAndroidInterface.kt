@@ -7,14 +7,10 @@ object MelonDSAndroidInterface {
     external fun getEmulatorGlContext(): Long
     external fun cleanup()
 
-    // Local multiplayer over Wi-Fi (see docs/netplay-plan.md). Sessions normally start from the game's own
-    // wireless menus; these calls back the manual Host / Join buttons of the Local multiplayer screen.
-    external fun mirrorStart()
-    external fun mirrorStop()
-    external fun netHost(port: Int, inputDelay: Int)
-    external fun netJoin(address: String, port: Int, inputDelay: Int)
+    // Local multiplayer over Wi-Fi (see docs/netplay-plan.md). Sessions start from the game's own wireless menus
+    // (create group / join list); these calls back the Local multiplayer screen.
     external fun netStop()
 
-    // "<phase> <frame> <desyncs> <message>"; phase is idle|hosting|searching|joining|waiting|connecting|syncing|running|error
+    // "<phase> <frame> <desyncs> <message>"; phase is idle|hosting|searching|joining|running|stalled
     external fun netStatus(): String
 }

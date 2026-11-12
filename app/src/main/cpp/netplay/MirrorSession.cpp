@@ -7,7 +7,6 @@
 #include "NDSCart.h"
 #include "NetplayCommon.h"
 #include <time.h>
-#include <zlib.h>
 #include "MelonInstance.h"
 #include "net/MPInterface.h"
 #include "Savestate.h"
@@ -197,8 +196,8 @@ void MirrorSession::inputHook(int sid, FrameInput& input)
 u32 MirrorSession::runFrame()
 {
     handleNetRequest();
-    if (net && !netBeforeFrame())
-        return 263; // connecting or syncing: hold the consoles still
+    if (net)
+        netBeforeFrame();
 
     auto kickMirror = [this] {
         {
@@ -261,10 +260,10 @@ MelonInstance* MirrorSession::getInstance(int index)
 // ---------------------------------------------------------------------------------------------------------------
 namespace
 {
-enum NetMsg : uint8_t { MsgHello = 1, MsgState = 2, MsgReady = 3, MsgInput = 4, MsgHash = 5 };
+enum NetMsg : uint8_t { MsgInput = 4, MsgHash = 5 };
 constexpr int kInputRedundancy = 16;
 constexpr uint32_t kHashInterval = 60;
-constexpr uint64_t kStallGiveUpMs = 20000;
+constexpr uint64_t kStallGiveUpMs = 600000; // the other device may be paused; a lost connection is detected by the link itself
 const FrameInput kNeutralInput { 0xFFF, 0, 0, 0, 0, {0, 0} };
 
 uint64_t nowMs()
@@ -288,90 +287,21 @@ template <typename T> bool get(const uint8_t*& p, const uint8_t* end, T& value)
 }
 }
 
-void MirrorSession::requestNetHost(int port, int inputDelay)
-{
-    std::lock_guard<std::mutex> lock(netRequestMutex);
-    netRequestPort = port > 0 ? port : 7064;
-    netRequestDelay = inputDelay > 0 ? inputDelay : 2;
-    netRequest = 1;
-}
-
-void MirrorSession::requestNetJoin(const std::string& address, int port, int inputDelay)
-{
-    std::lock_guard<std::mutex> lock(netRequestMutex);
-    netRequestAddress = address;
-    netRequestPort = port > 0 ? port : 7064;
-    netRequestDelay = inputDelay > 0 ? inputDelay : 2;
-    netRequest = 2;
-}
-
 void MirrorSession::requestNetStop()
 {
-    netRequest = 3;
-}
-
-uint32_t MirrorSession::romHash()
-{
-    const NDSCart::CartCommon* cart = primary->getNds()->NDSCartSlot.GetCart();
-    if (!cart) return 0;
-    uint32_t h = 2166136261u;
-    const u8* rom = cart->GetROM();
-    for (u32 i = 0; i < cart->GetROMLength(); i++)
-        h = (h ^ rom[i]) * 16777619u;
-    return h;
+    netStopRequested = true;
 }
 
 void MirrorSession::handleNetRequest()
 {
-    int request = netRequest.exchange(0);
-    if (request == 0)
-        return;
-
-    netEnd("new request");
-    if (request == 3)
-        return;
-
-    std::string address;
-    int port, delay;
-    {
-        std::lock_guard<std::mutex> lock(netRequestMutex);
-        address = netRequestAddress;
-        port = netRequestPort;
-        delay = netRequestDelay;
-    }
-
-    net = std::make_unique<NetplayLink>();
-    netIsHost = request == 1;
-    netLocalIndex = netIsHost ? 0 : 1;
-    netDelay = delay;
-    netHelloOk = false;
-    netReady = false;
-    netStateRx.clear();
-
-    bool ok = netIsHost ? net->host((uint16_t) port) : net->join(address, (uint16_t) port);
-    if (!ok)
-    {
-        net.reset();
-        LOGE("netplay: could not %s", netIsHost ? "host" : "join");
-        std::lock_guard<std::mutex> lock(netRequestMutex);
-        netMessage = netIsHost ? "could not open the port" : "bad address";
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(netRequestMutex);
-        netMessage.clear();
-    }
-    netFrameShown = 0;
-    netDesyncsShown = 0;
-    netPhase = netIsHost ? NetPhase::Listening : NetPhase::Connecting;
-    LOGI("netplay: %s %s (port %d, input delay %d)", netIsHost ? "hosting" : "joining", address.c_str(), port, delay);
+    if (netStopRequested.exchange(false))
+        netEnd("stopped");
 }
 
 void MirrorSession::netEnd(const char* reason)
 {
     if (netPhase.load() == NetPhase::Off && !net)
         return;
-    if (strcmp(reason, "new request") != 0)
     {
         std::lock_guard<std::mutex> lock(netRequestMutex);
         netMessage = reason;
@@ -387,18 +317,6 @@ void MirrorSession::netEnd(const char* reason)
         net.reset();
     }
     netPhase = NetPhase::Off;
-}
-
-bool MirrorSession::saveStateTo(int index, std::vector<uint8_t>& out)
-{
-    NDS* nds = getInstanceUnchecked(index)->getNds();
-    ScopedCurrentNds currentGuard(nds);
-    Savestate state;
-    if (state.Error || !nds->DoSavestate(&state) || state.Error)
-        return false;
-    auto* bytes = static_cast<const u8*>(state.Buffer());
-    out.assign(bytes, bytes + state.Length());
-    return true;
 }
 
 bool MirrorSession::loadStateFresh(int index, const uint8_t* data, size_t size)
@@ -417,38 +335,6 @@ bool MirrorSession::loadStateFresh(int index, const uint8_t* data, size_t size)
     return ok;
 }
 
-bool MirrorSession::netSyncAsHost()
-{
-    std::vector<uint8_t> states[2];
-    for (int i = 0; i < 2; i++)
-        if (!saveStateTo(i, states[i]))
-            return false;
-    // The host reloads too, so both devices start from the same freshly loaded consoles
-    for (int i = 0; i < 2; i++)
-        if (!loadStateFresh(i, states[i].data(), states[i].size()))
-            return false;
-    installLink();
-
-    // Savestates are mostly zeros: compress (39 MB raw -> a few MB)
-    std::vector<uint8_t> raw;
-    put(raw, (uint32_t) states[0].size());
-    put(raw, (uint32_t) states[1].size());
-    raw.insert(raw.end(), states[0].begin(), states[0].end());
-    raw.insert(raw.end(), states[1].begin(), states[1].end());
-    uLongf packed = compressBound(raw.size());
-    std::vector<uint8_t> msg(1 + 4 + packed);
-    msg[0] = MsgState;
-    uint32_t rawSize = (uint32_t) raw.size();
-    memcpy(&msg[1], &rawSize, 4);
-    if (compress2(&msg[5], &packed, raw.data(), raw.size(), 1) != Z_OK)
-        return false;
-    msg.resize(5 + packed);
-    net->send(msg.data(), msg.size(), true);
-    net->flush();
-    LOGI("netplay: sent state (%zu + %zu bytes, %zu compressed)", states[0].size(), states[1].size(), msg.size());
-    return true;
-}
-
 void MirrorSession::netOnPacket(const uint8_t* data, size_t size)
 {
     if (size < 1) return;
@@ -456,26 +342,6 @@ void MirrorSession::netOnPacket(const uint8_t* data, size_t size)
     const uint8_t* end = data + size;
     switch (data[0])
     {
-    case MsgHello:
-    {
-        uint32_t hash = 0;
-        get(p, end, hash);
-        netHelloOk = hash == romHash();
-        if (!netHelloOk)
-            LOGE("netplay: the other device has a different ROM (%08x vs %08x)", hash, romHash());
-        if (!netHelloOk)
-        {
-            std::lock_guard<std::mutex> lock(netRequestMutex);
-            netMessage = "the other device is running a different game";
-        }
-        break;
-    }
-    case MsgState:
-        netStateRx.assign(data, data + size);
-        break;
-    case MsgReady:
-        netReady = true;
-        break;
     case MsgInput:
     {
         uint32_t first; uint8_t count;
@@ -517,99 +383,33 @@ void MirrorSession::netSendInputs()
     net->flush();
 }
 
-// Emulator thread, before the frame. Returns false when this frame must not run (still connecting/syncing).
+// Emulator thread, before the frame: waits until the other device's input for this frame has arrived.
+// Returns true when the frame can run (also when the session just ended).
 bool MirrorSession::netBeforeFrame()
 {
     auto onPacket = [this](const uint8_t* d, size_t s) { netOnPacket(d, s); };
-    NetPhase phase = netPhase.load();
 
-    if (phase != NetPhase::Running)
-    {
-        NetplayLink::Event ev = net->service(0, onPacket);
-        if (ev == NetplayLink::Event::Disconnected)
-        {
-            netEnd("peer disconnected");
-            return true;
-        }
-        if (ev == NetplayLink::Event::Connected && !netIsHost)
-        {
-            std::vector<uint8_t> msg { MsgHello };
-            put(msg, romHash());
-            net->send(msg.data(), msg.size(), true);
-            net->flush();
-            netPhase = phase = NetPhase::AwaitState;
-        }
-
-        switch (phase)
-        {
-        case NetPhase::Listening:
-            if (!netHelloOk)
-                return true; // keep playing locally until someone joins
-            if (!netSyncAsHost())
-            {
-                netEnd("state sync failed");
-                return true;
-            }
-            netPhase = NetPhase::AwaitReady;
-            return false;
-        case NetPhase::Connecting:
-            return false;
-        case NetPhase::AwaitState:
-        {
-            if (netStateRx.empty())
-                return false;
-            uint32_t rawSize = 0;
-            if (netStateRx.size() > 5) memcpy(&rawSize, &netStateRx[1], 4);
-            std::vector<uint8_t> raw(rawSize);
-            uLongf rawLen = rawSize;
-            if (rawSize == 0 || uncompress(raw.data(), &rawLen, &netStateRx[5], netStateRx.size() - 5) != Z_OK)
-            {
-                netEnd("bad state from host");
-                return false;
-            }
-            const uint8_t* p = raw.data();
-            const uint8_t* end = raw.data() + rawLen;
-            uint32_t len0, len1;
-            if (!get(p, end, len0) || !get(p, end, len1) || (size_t) (end - p) < (size_t) len0 + len1
-                || !loadStateFresh(0, p, len0) || !loadStateFresh(1, p + len0, len1))
-            {
-                netEnd("bad state from host");
-                return false;
-            }
-            netStateRx.clear();
-            installLink();
-            setFocus(1);
-            std::vector<uint8_t> msg { MsgReady };
-            net->send(msg.data(), msg.size(), true);
-            net->flush();
-            break; // start running below
-        }
-        case NetPhase::AwaitReady:
-            if (!netReady)
-                return false;
-            break;
-        default:
-            return true;
-        }
-
-        netBeginRunning();
-    }
-
-    // Running: wait until the other device's input for this frame is here
     uint64_t start = 0, lastSend = 0;
     for (;;)
     {
         NetplayLink::Event ev = net->service(0, onPacket);
-        if (ev == NetplayLink::Event::Disconnected)
+        if (ev == NetplayLink::Event::Disconnected || !net->isConnected())
         {
             netEnd("peer disconnected");
             return true;
         }
         if (netRemote[netFrame % kInputRing].frame == netFrame)
             break;
+        if (netStopRequested.exchange(false))
+        {
+            netEnd("stopped");
+            return true;
+        }
 
         uint64_t now = nowMs();
         if (start == 0) start = lastSend = now;
+        if (now - start > 1000)
+            netStalled = true;
         if (now - lastSend >= 16)
         {
             netSendInputs(); // resend in case packets were lost
@@ -620,8 +420,11 @@ bool MirrorSession::netBeforeFrame()
             netEnd("other device stopped sending input");
             return true;
         }
+        // Short sleep until something arrives. A disconnect reported here must not be lost: it is picked up by the
+        // isConnected() check at the top of the loop.
         net->service(2, onPacket);
     }
+    netStalled = false;
     if (start != 0)
     {
         uint64_t stalled = nowMs() - start;
@@ -704,11 +507,7 @@ std::string MirrorSession::netStatus()
     switch (netPhase.load())
     {
     case NetPhase::Off: phase = "off"; break;
-    case NetPhase::Listening: phase = "waiting"; break;
-    case NetPhase::Connecting: phase = "connecting"; break;
-    case NetPhase::AwaitState:
-    case NetPhase::AwaitReady: phase = "syncing"; break;
-    case NetPhase::Running: phase = "running"; break;
+    case NetPhase::Running: phase = netStalled.load() ? "stalled" : "running"; break;
     }
     std::lock_guard<std::mutex> lock(netRequestMutex);
     return std::string(phase) + " " + std::to_string(netFrameShown.load()) + " " + std::to_string(netDesyncsShown.load()) + " " + netMessage;
@@ -762,11 +561,32 @@ bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstan
         ScopedCurrentNds guard(mirror->getNds());
         mirror->getNds()->SetFirmware(Firmware(remoteFirmware.data(), (u32) remoteFirmware.size()));
     }
+    // This device's own console keeps this device's own save: loading a state writes the state's save data back
+    // to the save file, so remember the save memory first and verify it is unchanged afterwards.
+    std::vector<uint8_t> ownSaveBefore;
+    {
+        const NDSCart::CartCommon* cart = primary->getNds()->NDSCartSlot.GetCart();
+        if (cart && cart->GetSaveMemory())
+            ownSaveBefore.assign(cart->GetSaveMemory(), cart->GetSaveMemory() + cart->GetSaveMemoryLength());
+    }
     if (!loadStateFresh(0, ownState.data(), ownState.size()) || !loadStateFresh(1, remoteState.data(), remoteState.size()))
     {
         LOGE("netplay: could not load the session states");
+        restoreOwnSave(ownSaveBefore);
         stop();
         return false;
+    }
+    {
+        const NDSCart::CartCommon* cart = primary->getNds()->NDSCartSlot.GetCart();
+        bool unchanged = ownSaveBefore.empty() || (cart && cart->GetSaveMemory() && cart->GetSaveMemoryLength() == ownSaveBefore.size()
+                                                  && memcmp(cart->GetSaveMemory(), ownSaveBefore.data(), ownSaveBefore.size()) == 0);
+        if (!unchanged)
+        {
+            LOGE("netplay: this device's save changed while loading the session; restoring it and not starting");
+            restoreOwnSave(ownSaveBefore);
+            stop();
+            return false;
+        }
     }
     // Cheats are per device (only this device's console has them): never active during a session
     savedCheats = primary->getNds()->AREngine.Cheats;
@@ -787,5 +607,33 @@ bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstan
     setFocus(0);
     netBeginRunning();
     return true;
+}
+}
+
+namespace MelonDSAndroid
+{
+// Puts the given save memory back into this device's own console (and, through the cartridge, its save file)
+void MirrorSession::restoreOwnSave(const std::vector<uint8_t>& saveMemory)
+{
+    if (saveMemory.empty())
+        return;
+    NDS* nds = primary->getNds();
+    ScopedCurrentNds guard(nds);
+    NDSCart::CartCommon* cart = nds->NDSCartSlot.GetCart();
+    if (cart)
+        cart->SetSaveMemory(saveMemory.data(), (u32) saveMemory.size());
+}
+}
+
+namespace MelonDSAndroid
+{
+void MirrorSession::servicePaused()
+{
+    handleNetRequest();
+    if (!net)
+        return;
+    NetplayLink::Event ev = net->service(0, [this](const uint8_t* d, size_t s) { netOnPacket(d, s); });
+    if (ev == NetplayLink::Event::Disconnected)
+        netEnd("peer disconnected");
 }
 }

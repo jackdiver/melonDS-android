@@ -19,16 +19,6 @@ static void enableZeroInitializedHeap()
         fn(M_BIONIC_ZERO_INIT, 1);
 }
 
-static std::string jstringToString(JNIEnv* env, jstring value)
-{
-    if (!value)
-        return {};
-    const char* chars = env->GetStringUTFChars(value, nullptr);
-    std::string result(chars);
-    env->ReleaseStringUTFChars(value, chars);
-    return result;
-}
-
 JniEnvHandler* jniEnvHandler;
 
 JavaVM* vm;
@@ -54,30 +44,6 @@ Java_me_magnum_melonds_MelonDSAndroidInterface_setup(JNIEnv* env, jobject thiz, 
 
     MelonDSAndroid::openGlContext = openGlContext;
     MelonDSAndroid::fileHandler = fileHandler;
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorStart(JNIEnv* env, jobject thiz)
-{
-    MelonDSAndroid::requestMirrorStart();
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorStop(JNIEnv* env, jobject thiz)
-{
-    MelonDSAndroid::requestMirrorStop();
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_netHost(JNIEnv* env, jobject thiz, jint port, jint inputDelay)
-{
-    MelonDSAndroid::requestNetHost(port, inputDelay);
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_netJoin(JNIEnv* env, jobject thiz, jstring address, jint port, jint inputDelay)
-{
-    MelonDSAndroid::requestNetJoin(jstringToString(env, address), port, inputDelay);
 }
 
 JNIEXPORT void JNICALL

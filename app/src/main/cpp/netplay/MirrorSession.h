@@ -40,9 +40,6 @@ public:
     // Emulator thread: runs one frame on both consoles.
     melonDS::u32 runFrame();
 
-    // Manual start from the Local multiplayer screen. Host = console 0, joiner = console 1.
-    void requestNetHost(int port, int inputDelay);
-    void requestNetJoin(const std::string& address, int port, int inputDelay);
     void requestNetStop();
     // Lobby path: both devices already exchanged their own console state + firmware. Emulator thread, at a
     // frame boundary. The session ends (and the mirror is dropped) when the connection ends: see shouldEnd().
@@ -51,6 +48,9 @@ public:
                          const std::vector<uint8_t>& ownState,
                          const std::vector<uint8_t>& remoteFirmware, const std::vector<uint8_t>& remoteState);
     bool shouldEnd() const { return active && netAutoStop && !net; }
+    // Emulator thread, while the emulator is paused (pause menu, app in background): keeps the connection alive and
+    // processes a pending Stop. The other device waits for this one in the meantime.
+    void servicePaused();
     // Thread-safe summary for the UI: "<phase> <frame> <desyncs> <message>"
     std::string netStatus();
 
@@ -68,7 +68,7 @@ private:
     void waitForMirror();
 
     // Netplay
-    enum class NetPhase { Off, Listening, Connecting, AwaitState, AwaitReady, Running };
+    enum class NetPhase { Off, Running };
     struct InputSlot { uint32_t frame = 0xFFFFFFFF; FrameInput input {}; };
     static constexpr int kInputRing = 4096;
     void handleNetRequest();
@@ -79,10 +79,8 @@ private:
     void netSendInputs();
     void netEnd(const char* reason);
     void netBeginRunning();
-    bool netSyncAsHost();
-    bool saveStateTo(int index, std::vector<uint8_t>& out);
     bool loadStateFresh(int index, const uint8_t* data, size_t size);
-    uint32_t romHash();
+    void restoreOwnSave(const std::vector<uint8_t>& saveMemory);
 
     std::shared_ptr<MelonInstance> primary;
     std::shared_ptr<MelonInstance> mirror;
@@ -102,10 +100,7 @@ private:
     // Netplay state (emulator thread, except the request fields)
     std::unique_ptr<NetplayLink> net;
     std::mutex netRequestMutex;
-    std::atomic<int> netRequest { 0 }; // 0 none, 1 host, 2 join, 3 stop
-    std::string netRequestAddress;
-    int netRequestPort = 7064;
-    int netRequestDelay = 2;
+    std::atomic<bool> netStopRequested { false };
     std::atomic<NetPhase> netPhase { NetPhase::Off };
     bool netIsHost = false;
     int netLocalIndex = 0;
@@ -115,9 +110,6 @@ private:
     uint32_t netLocalCount = 0;
     InputSlot netLocal[kInputRing];
     InputSlot netRemote[kInputRing];
-    bool netHelloOk = false;
-    bool netReady = false;
-    std::vector<uint8_t> netStateRx;
     std::vector<std::pair<uint32_t, std::pair<uint64_t, uint64_t>>> netLocalHashes;
     std::vector<std::pair<uint32_t, std::pair<uint64_t, uint64_t>>> netRemoteHashes;
     uint32_t netDesyncs = 0;
@@ -125,6 +117,7 @@ private:
     uint64_t netStallMs = 0;
     std::atomic<uint32_t> netFrameShown { 0 };
     std::atomic<uint32_t> netDesyncsShown { 0 };
+    std::atomic<bool> netStalled { false }; // waiting for the other device's input
     std::string netMessage; // last end reason or error (netRequestMutex)
     // Session ids (host console = 0). Default 0/1; a joiner started from the lobby runs its own console as 1.
     int sidPrimary = 0;

@@ -1,14 +1,11 @@
 package me.magnum.melonds.ui.emulator.netplay
 
-import android.content.Context
 import android.content.pm.PackageManager
-import android.net.ConnectivityManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.text.InputType
-import android.view.ViewGroup
-import android.widget.EditText
+import android.view.Gravity
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -16,15 +13,15 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.edit
 import me.magnum.melonds.MelonDSAndroidInterface
-import java.net.Inet4Address
 
 /**
- * Host/Join screen for local multiplayer over Wi-Fi (netplay, see docs/netplay-plan.md).
+ * Wi-Fi multiplayer status (netplay, see docs/netplay-plan.md).
  *
- * Both devices run both consoles; only inputs travel over the network. The host is player 1, the joiner
- * player 2. While a session is active, status changes are shown as short messages.
+ * Sessions start from the game's own wireless menus: one device creates a group, the other opens the group list.
+ * Both devices then run both consoles and only inputs travel over the network. This class reports progress as short
+ * messages, asks for the local network permission when the game first uses wireless, and backs the pause menu's
+ * "Local multiplayer" screen (status and a Stop button).
  */
 class LocalMultiplayerController(
     private val activity: AppCompatActivity,
@@ -32,10 +29,6 @@ class LocalMultiplayerController(
     private val onDialogClosed: (resume: Boolean) -> Unit,
 ) {
     private companion object {
-        const val PORT = 7064
-        const val INPUT_DELAY = 2
-        const val PREFS = "local_multiplayer"
-        const val PREF_LAST_HOST = "last_host"
         const val LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
         const val PERMISSION_REQUEST = 7064
         const val POLL_MS = 500L
@@ -47,6 +40,8 @@ class LocalMultiplayerController(
     private var lastStatus: Status? = null
     private var polling = false
     private var dialogStatusView: TextView? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
+    private var permissionRequested = false
 
     private val poll = object : Runnable {
         override fun run() {
@@ -61,86 +56,35 @@ class LocalMultiplayerController(
 
     fun showDialog() {
         val padding = (20 * activity.resources.displayMetrics.density).toInt()
-        val ownAddress = localIpAddress()
-        val prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-        val statusView = TextView(activity)
-        val addressView = TextView(activity).apply {
-            text = if (ownAddress != null) "This device: $ownAddress" else "Not connected to Wi-Fi"
-        }
-        val hostInput = EditText(activity).apply {
-            hint = "Host IP address (to join)"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setText(prefs.getString(PREF_LAST_HOST, ""))
-            setSingleLine()
+        val statusView = TextView(activity).apply {
+            gravity = Gravity.START
+            setPadding(padding, padding / 2, padding, 0)
+            text = describe(readStatus())
         }
         val layout = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(padding, padding / 2, padding, 0)
-            addView(addressView)
-            addView(statusView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also { })
-            addView(hostInput)
+            addView(statusView)
         }
-        statusView.setPadding(0, padding / 2, 0, padding / 2)
         dialogStatusView = statusView
-        statusView.text = describe(readStatus())
 
         onDialogShown()
-        var resumeOnClose = true
-        val dialog = AlertDialog.Builder(activity)
+        AlertDialog.Builder(activity)
             .setTitle("Local multiplayer")
             .setView(layout)
-            .setPositiveButton("Host", null)
-            .setNeutralButton("Join", null)
-            .setNegativeButton("Stop", null)
+            .setMessage("To play: create a group in the game's multiplayer menu on one device and open the group list on the other.")
+            .setPositiveButton("Close", null)
+            .setNegativeButton("Stop session") { _, _ -> MelonDSAndroidInterface.netStop() }
             .setOnDismissListener {
                 dialogStatusView = null
-                onDialogClosed(resumeOnClose)
+                onDialogClosed(true)
             }
-            .create()
-
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                if (ensureLocalNetworkPermission()) {
-                    MelonDSAndroidInterface.mirrorStart()
-                    MelonDSAndroidInterface.netHost(PORT, INPUT_DELAY)
-                    toast(if (ownAddress != null) "Hosting. On the other device, join $ownAddress" else "Hosting")
-                    startPolling()
-                    dialog.dismiss()
-                }
-            }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                val address = hostInput.text.toString().trim()
-                if (!isIpv4(address)) {
-                    hostInput.error = "Enter the host's IP address, e.g. 192.168.0.4"
-                    return@setOnClickListener
-                }
-                if (ensureLocalNetworkPermission()) {
-                    prefs.edit { putString(PREF_LAST_HOST, address) }
-                    MelonDSAndroidInterface.mirrorStart()
-                    MelonDSAndroidInterface.netJoin(address, PORT, INPUT_DELAY)
-                    startPolling()
-                    dialog.dismiss()
-                }
-            }
-            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-                stopSession()
-                dialog.dismiss()
-            }
-        }
-        dialog.show()
+            .show()
         startPolling()
     }
 
-    fun stopSession() {
-        MelonDSAndroidInterface.netStop()
-        MelonDSAndroidInterface.mirrorStop()
-    }
-
     /**
-     * Always-on watcher: sessions can start from the game's own wireless menus (create group / join), so status
-     * changes are reported even when this dialog was never opened. Also keeps Wi-Fi broadcasts flowing for host
-     * discovery.
+     * Always-on watcher: sessions start from the game's own wireless menus, so status changes are reported even when
+     * the screen was never opened. Also keeps Wi-Fi broadcasts flowing for host discovery.
      */
     fun start() {
         acquireMulticastLock()
@@ -154,12 +98,9 @@ class LocalMultiplayerController(
         multicastLock = null
     }
 
-    private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
-    private var permissionRequested = false
-
     private fun acquireMulticastLock() {
         if (multicastLock != null) return
-        val wifi = activity.applicationContext.getSystemService(android.net.wifi.WifiManager::class.java) ?: return
+        val wifi = activity.applicationContext.getSystemService(WifiManager::class.java) ?: return
         multicastLock = wifi.createMulticastLock("melonDS-netplay").apply {
             setReferenceCounted(false)
             try { acquire() } catch (_: SecurityException) { }
@@ -187,13 +128,9 @@ class LocalMultiplayerController(
             "hosting" -> "Your game created a group: waiting for another device to look for groups"
             "searching" -> "Your game is looking for groups: searching the Wi-Fi network for a host"
             "joining" -> "Another device is joining..."
-            "idle" -> if (status.message.isNotEmpty()) status.message else "Not connected. Create or look for a group in the game, or use Host / Join below."
-            "waiting" -> "Hosting: waiting for the other player to join"
-            "connecting" -> "Connecting to the host..."
-            "syncing" -> "Connected, starting the session..."
             "running" -> if (status.desyncs == 0L) "Playing, in sync" else "Playing, ${status.desyncs} desync(s) detected"
-            "error" -> status.message
-            else -> if (status.message.isNotEmpty()) "Not connected (last session: ${status.message})" else "Not connected"
+            "stalled" -> "Waiting for the other player (their game may be paused)"
+            else -> if (status.message.isNotEmpty()) status.message else "Not connected"
         }
     }
 
@@ -205,16 +142,15 @@ class LocalMultiplayerController(
             when (new.phase) {
                 "hosting" -> toast("Wi-Fi multiplayer: group open to other devices")
                 "joining" -> toast("A player is joining over Wi-Fi...")
-                "syncing" -> toast("Player connected, starting...")
-                "running" -> toast("Wi-Fi multiplayer connected")
-                "error" -> toast(new.message)
-                "off", "idle" -> if (old.phase == "running")
+                "running" -> if (old.phase != "stalled") toast("Wi-Fi multiplayer connected")
+                "stalled" -> toast("Waiting for the other player (their game may be paused)...")
+                else -> if (old.phase == "running" || old.phase == "stalled")
                     toast(if (new.message.isNotEmpty()) "Wi-Fi multiplayer ended: ${new.message}" else "Wi-Fi multiplayer ended")
             }
         }
-        if (new.message.isNotEmpty() && new.message != old.message && new.phase != "running" && old.phase != "running")
+        if (new.message.isNotEmpty() && new.message != old.message && new.phase != "running" && new.phase != "stalled" && old.phase != "running" && old.phase != "stalled")
             toast(new.message)
-        if (new.phase == "running" && old.desyncs == 0L && new.desyncs > 0)
+        if ((new.phase == "running" || new.phase == "stalled") && old.desyncs == 0L && new.desyncs > 0)
             toast("The two devices are out of sync") // once per session
     }
 
@@ -225,34 +161,6 @@ class LocalMultiplayerController(
             return
         permissionRequested = true
         ActivityCompat.requestPermissions(activity, arrayOf(LOCAL_NETWORK_PERMISSION), PERMISSION_REQUEST)
-    }
-
-    private fun ensureLocalNetworkPermission(): Boolean {
-        if (Build.VERSION.SDK_INT < 37)
-            return true
-        if (ContextCompat.checkSelfPermission(activity, LOCAL_NETWORK_PERMISSION) == PackageManager.PERMISSION_GRANTED)
-            return true
-        ActivityCompat.requestPermissions(activity, arrayOf(LOCAL_NETWORK_PERMISSION), PERMISSION_REQUEST)
-        toast("Allow local network access, then try again")
-        return false
-    }
-
-    private fun localIpAddress(): String? {
-        val connectivity = activity.getSystemService(ConnectivityManager::class.java) ?: return null
-        for (network in connectivity.allNetworks) {
-            val properties = connectivity.getLinkProperties(network) ?: continue
-            val address = properties.linkAddresses
-                .map { it.address }
-                .firstOrNull { it is Inet4Address && !it.isLoopbackAddress && it.isSiteLocalAddress }
-            if (address != null)
-                return address.hostAddress
-        }
-        return null
-    }
-
-    private fun isIpv4(text: String): Boolean {
-        val parts = text.split(".")
-        return parts.size == 4 && parts.all { part -> part.toIntOrNull()?.let { it in 0..255 } == true }
     }
 
     private fun toast(text: String) {
