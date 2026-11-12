@@ -43,10 +43,40 @@ void DeterministicMP::registerInstance(int inst, NDS* nds)
     i = Instance();
     i.registered = true;
     i.nds = nds;
+    i.mac = nds->GetFirmware().GetHeader().MacAddr;
     i.base = nds->GetSysClockCycles(0);
     i.published = 0;
     i.state = State::Barrier;
+    updateMacClashLocked();
     changedLocked();
+}
+
+void DeterministicMP::updateMacClashLocked()
+{
+    macClash = instances[0].registered && instances[1].registered && instances[0].mac == instances[1].mac;
+    if (!macClash)
+        return;
+    for (int s = 0; s < 2; s++)
+    {
+        macAlias[s] = instances[s].mac;
+        macAlias[s][5] ^= (s == 0) ? 0x5A : 0xA5;
+    }
+    LOGI("both consoles have the same MAC address: showing them different addresses for each other");
+}
+
+void DeterministicMP::translateMacs(int from, int to, u8* frame, size_t length) const
+{
+    if (!macClash || from < 0 || from > 1 || to < 0 || to > 1 || length < 12 + 22)
+        return;
+    const auto& real = instances[from].mac;
+    for (size_t offset : { 12 + 4, 12 + 10, 12 + 16 }) // addr1, addr2, addr3
+    {
+        u8* field = frame + offset;
+        if (memcmp(field, real.data(), 6) == 0)
+            memcpy(field, macAlias[from].data(), 6);         // the sender's own identity
+        else if (memcmp(field, macAlias[to].data(), 6) == 0)
+            memcpy(field, instances[to].mac.data(), 6);      // the receiver, as the sender knows it
+    }
 }
 
 void DeterministicMP::setAtBarrier(int inst, bool atBarrier)
@@ -282,6 +312,7 @@ int DeterministicMP::deliverLocked(int inst, int index, u8* data, u64* timestamp
     if (!p.data.empty())
     {
         memcpy(data, p.data.data(), p.data.size());
+        translateMacs(p.sender, inst, data, p.data.size());
         if ((p.type & 0xFFFF) == 1)
             me.lastHostId = p.sender;
     }
@@ -507,6 +538,7 @@ u16 DeterministicMP::RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask)
         if (aid < 1 || aid > 15 || p->data.size() > 1024)
             continue;
         memcpy(&data[(aid - 1) * 1024], p->data.data(), p->data.size());
+        translateMacs(p->sender, inst, &data[(aid - 1) * 1024], p->data.size());
         ret |= (1 << aid);
     }
     return ret;

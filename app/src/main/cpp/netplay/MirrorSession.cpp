@@ -1046,6 +1046,10 @@ void MirrorSession::netAfterFrame()
         dump.frame = netFrame;
         appendRam(consoleBySession(0)->getNds(), dump.ram[0]);
         appendRam(consoleBySession(1)->getNds(), dump.ram[1]);
+        // DEBUG: the first four checks are always written, so both devices have comparable snapshots
+        if (netFrame <= 180 && !netRecDir.empty())
+            for (int c = 0; c < 2; c++)
+                writeFile(netRecDir + "/netrec/early-c" + std::to_string(c) + "-" + std::to_string(netFrame) + ".bin", dump.ram[c]);
         netDumps.push_back(std::move(dump));
         if (netDumps.size() > 4) netDumps.erase(netDumps.begin());
         std::vector<uint8_t> msg { MsgHash };

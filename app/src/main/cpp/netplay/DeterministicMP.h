@@ -1,6 +1,7 @@
 #ifndef DETERMINISTICMP_H
 #define DETERMINISTICMP_H
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -87,6 +88,7 @@ private:
     {
         bool registered = false;
         melonDS::NDS* nds = nullptr;
+        std::array<melonDS::u8, 6> mac {};   // the console's real MAC address (from its firmware)
         uint64_t base = 0;
         uint64_t published = 0;
         State state = State::Barrier;
@@ -130,6 +132,14 @@ private:
     Instance instances[kMaxInstances];
     int sessionOf[kMaxInstances] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     int toSession(int inst) const { return (inst >= 0 && inst < kMaxInstances) ? sessionOf[inst] : inst; }
+
+    // Both consoles may have the same MAC (same firmware file, cloned settings). The game cannot be restarted mid-session,
+    // so the link shows each console a *different* address for the other one by rewriting the three 802.11 address
+    // fields of every frame that passes between them. Deterministic: depends only on the two real MACs.
+    bool macClash = false;
+    std::array<melonDS::u8, 6> macAlias[2];
+    void updateMacClashLocked();
+    void translateMacs(int from, int to, melonDS::u8* frame, size_t length) const;
 
     // Current MP round (last CMD sent)
     int hostInst = -1;

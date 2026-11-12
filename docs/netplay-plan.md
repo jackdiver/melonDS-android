@@ -245,3 +245,11 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   (built-in firmware). Verified S23 + Odin with a forced clash (2026-11-12).
 - Open: in that verified run, console 1 (the joiner) differed at the first three hash checks (frames 0-120) and was
   in sync afterwards; its firmware and start state were identical on both devices. Not seen without a clash.
+- **No more "reopen the menu" on a MAC clash** (supersedes the earlier MAC note): if both consoles have the same MAC, the
+  deterministic link shows each console a *different* address for the other one, by rewriting the three 802.11 address
+  fields of every frame passing between them (sender's own MAC -> alias, the receiver's alias -> its real MAC). Both
+  devices derive the same aliases from the shared MAC, so the result stays deterministic. The game is never restarted
+  and nothing is saved. Payload-level MAC copies, if a game has any, are not translated.
+- The brief early desync seen once during the clash test (console 1, frames 0-120) did not come back in a later run
+  (snapshots of frames 0/60/120/180 byte-identical on both devices); that run still used the old change-the-MAC path,
+  which is now removed.

@@ -64,8 +64,7 @@ private:
     bool findHost(uint32_t gameId, std::string& address);
     bool snapshot(melonDS::NDS* nds, std::vector<uint8_t>& state, std::vector<uint8_t>& firmware);
     void sendHello(melonDS::NDS* nds);
-    bool checkHello(melonDS::NDS* nds, const uint8_t* data, size_t size, std::string& error, bool& macClash);
-    void changeOwnMac(melonDS::NDS* nds);
+    bool checkHello(melonDS::NDS* nds, const uint8_t* data, size_t size, std::string& error);
     void sendState(const std::vector<uint8_t>& state, const std::vector<uint8_t>& firmware);
     bool readState(const uint8_t* data, size_t size, std::vector<uint8_t>& state, std::vector<uint8_t>& firmware);
     void setMessage(const std::string& message);
@@ -84,7 +83,6 @@ private:
     std::string hostAddress;
     bool helloReceived = false;
     bool stateSent = false;
-    bool macChangePending = false; // own MAC was changed: wait until the game turns its radio off and on again
     std::vector<uint8_t> receivedPacket;
     std::vector<uint8_t> ownState;
     std::vector<uint8_t> ownFirmware;
