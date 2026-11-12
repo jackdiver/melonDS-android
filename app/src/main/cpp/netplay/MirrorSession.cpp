@@ -490,9 +490,9 @@ u32 MirrorSession::runFrame()
         cv.notify_all();
     };
 
-    // Consoles run one after the other: running them concurrently has a timing race that makes replays
-    // unrepeatable (see docs/netplay-plan.md). DEBUG flag 32 brings back the concurrent mode.
-    bool serial = (debugFlags & 32) == 0 || netRunning;
+    // Consoles run in parallel (repeatable since the link and savestate fixes, see docs/netplay-plan.md).
+    // DEBUG flag 2 runs them one after the other instead.
+    bool serial = (debugFlags & 2) != 0;
     // Both consoles are marked running before either starts: otherwise one can briefly look parked at the
     // previous frame end and the deadlock rule would release the other early, depending on thread timing
     mp->setAtBarrier(primary->getInstanceId(), false);
@@ -521,6 +521,18 @@ u32 MirrorSession::runFrame()
                  (unsigned long long) DeterminismHarness::hashState(primary->getNds()),
                  (unsigned long long) DeterminismHarness::hashState(mirror->getNds()));
         fprintf(hashFile, "%s\n", line);
+
+        // DEBUG flag 128: cheap post-frame dump of frames 0-2 (no tracing, no per-frame copies)
+        if ((debugFlags & 128) && recFrame < 3 && recMode.load() == RecMode::Replay)
+        {
+            MelonInstance* inst[2] = { primary.get(), mirror.get() };
+            for (int i = 0; i < 2; i++)
+            {
+                std::vector<u8> post;
+                appendRam(inst[i]->getNds(), post);
+                writeFile(recDir + "/ramq" + std::to_string(i) + "-" + std::to_string(recFrame) + "-" + recTag + ".bin", post);
+            }
+        }
 
         if (capture)
         {

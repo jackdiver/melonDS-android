@@ -189,3 +189,13 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - Still open: on the S23, parallel replays differ from frame 0 on both consoles (serial is fine). Something
   S23-specific remains racy; capture mode (slow) hides it. Debug flag 64 (no-op hook between JIT blocks) did
   not change it, so it is not the JIT trace hook effect.
+
+#### Root cause of the "junk value" blips found (2026-11-12)
+- melonDS did not save (or reset) the hardware divider and square-root unit values (DivNumerator/Denominator/
+  Quotient/Remainder, SqrtVal, SqrtRes). Mario Kart DS saves/restores them on thread switches, so after a state
+  load they leaked whatever the console computed before. Reproduced reliably by playing 20 s before the replay.
+  Fixed in the core: saved from savestate version 13.1 and cleared on reset.
+- Result: S23 and Odin match on all 8509 frames with both consoles in parallel (full RAM + DTCM + banked
+  registers hashed); each phone is also repeatable run to run.
+- Consoles now run in parallel by default, netplay included (debug flag 2 = serial). Netplay title screen:
+  ~10-11 ms per frame on both phones (well under the 16.7 ms budget), 0 desyncs.
