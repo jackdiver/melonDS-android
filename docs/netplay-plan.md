@@ -216,3 +216,5 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - Threaded 3D rendering is deterministic after the divider/sqrt fix (replays identical to non-threaded and
   S23 = Odin on all 8509 frames). It is the default again: race frames ~18 ms -> ~10 ms on the S23.
 - Default input delay lowered from 4 to 2 frames (~33 ms).
+- Played session with the Odin hosting (2026-11-12): ~10 min / 34,700 frames, 580 checks, 0 desyncs;
+  ~8-9 ms per frame on both phones (full 60 fps with headroom); total stall ~1.5% of the time. Lag "feels better".
