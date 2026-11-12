@@ -123,11 +123,11 @@ private:
     std::atomic<int> netRequest { 0 }; // 0 none, 1 host, 2 join, 3 stop
     std::string netRequestAddress;
     int netRequestPort = 7064;
-    int netRequestDelay = 4;
+    int netRequestDelay = 2;
     std::atomic<NetPhase> netPhase { NetPhase::Off };
     bool netIsHost = false;
     int netLocalIndex = 0;
-    int netDelay = 4;
+    int netDelay = 2;
     uint32_t netFrame = 0;
     uint32_t netLocalLast = 0;      // newest local input frame produced (valid when netLocalCount > 0)
     uint32_t netLocalCount = 0;

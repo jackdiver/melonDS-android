@@ -1,6 +1,7 @@
 #ifndef DETERMINISTICMP_H
 #define DETERMINISTICMP_H
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -41,6 +42,9 @@ public:
     // Wake and release every waiter (session teardown).
     void shutdown();
 
+    // DEBUG stats: blocking waits since last call (count, total ms), per instance 0/1
+    void takeWaitStats(uint32_t count[2], double ms[2]);
+
     void Process() override {}
 
     void Begin(int inst) override;
@@ -59,6 +63,7 @@ private:
     // System clock is 33.513982 MHz
     static constexpr uint64_t kReplyWindow = 67028;        // 2 ms
     static constexpr uint64_t kHostPacketTimeout = 837850; // 25 ms, same as LocalMP's wall-clock timeout
+    static constexpr int kSpinMicros = 200; // wall-clock spin before sleeping (performance only)
 
     struct Packet
     {
@@ -114,6 +119,7 @@ private:
     std::mutex mutex;
     std::condition_variable cv;
     uint64_t epoch = 0;
+    std::atomic<uint64_t> epochPublished { 0 }; // copy of epoch readable without the lock (spin-waiting)
     bool shuttingDown = false;
     Instance instances[kMaxInstances];
 
@@ -122,6 +128,9 @@ private:
     uint64_t cmdTime = 0;
     // Replies are matched to a CMD by emulated time (reply.time >= cmdTime), never by arrival order
     std::vector<Packet> replies;
+
+    uint32_t statWaits[2] = {0, 0};
+    double statWaitMs[2] = {0, 0};
 };
 
 }

@@ -74,11 +74,9 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
         return false;
     }
 
-    // Note: JIT *with fast memory off* leaked host data into emulated RAM (non-deterministic across devices),
-    // so the default (fast memory on) is kept. Fast memory faults are dispatched via the per-thread NDS::Current.
-    // The threaded software renderer's timing can leak into emulated state (seen as replay mismatches on
-    // the S23 from frame 0), so netplay renders 3D on the emulation thread
-    setThreadedRendering(primaryInstance->getNds(), false);
+    // Threaded 3D rendering is deterministic (replays match across phones); the mismatches once blamed on it
+    // came from the divider/sqrt savestate gap. It roughly halves frame time during races.
+    setThreadedRendering(primaryInstance->getNds(), (debugFlags & 256) == 0); // threaded 3D is deterministic; flag 256 = render on the emulation thread
 
     if (!mirrorInstance->cloneFrom(*primaryInstance))
     {
@@ -88,7 +86,7 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
 
     primary = std::move(primaryInstance);
     mirror = std::move(mirrorInstance);
-    setThreadedRendering(mirror->getNds(), false);
+    setThreadedRendering(mirror->getNds(), (debugFlags & 256) == 0);
 
 #ifdef JIT_ENABLED
     // DEBUG experiment: JIT option variations (flags 4/8/16)
@@ -572,6 +570,9 @@ u32 MirrorSession::runFrame()
         {
             LOGI("timing (ms/frame avg of 300): total %.2f | net wait %.2f | primary %.2f | mirror %.2f | rest %.2f",
                  accTotal / 300, accNet / 300, accPrimary / 300, accMirror / 300, (accTotal - accNet - accPrimary - accMirror) / 300);
+            uint32_t wc[2]; double wm[2];
+            mp->takeWaitStats(wc, wm);
+            LOGI("link waits per frame: console0 %.1f (%.2f ms)  console1 %.1f (%.2f ms)", wc[0] / 300.0, wm[0] / 300, wc[1] / 300.0, wm[1] / 300);
             accTotal = accNet = accPrimary = accMirror = 0; accN = 0;
         }
     }
@@ -653,7 +654,7 @@ void MirrorSession::requestNetHost(int port, int inputDelay)
 {
     std::lock_guard<std::mutex> lock(netRequestMutex);
     netRequestPort = port > 0 ? port : 7064;
-    netRequestDelay = inputDelay > 0 ? inputDelay : 4;
+    netRequestDelay = inputDelay > 0 ? inputDelay : 2;
     netRequest = 1;
 }
 
@@ -662,7 +663,7 @@ void MirrorSession::requestNetJoin(const std::string& address, int port, int inp
     std::lock_guard<std::mutex> lock(netRequestMutex);
     netRequestAddress = address;
     netRequestPort = port > 0 ? port : 7064;
-    netRequestDelay = inputDelay > 0 ? inputDelay : 4;
+    netRequestDelay = inputDelay > 0 ? inputDelay : 2;
     netRequest = 2;
 }
 

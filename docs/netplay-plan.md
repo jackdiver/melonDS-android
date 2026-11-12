@@ -199,3 +199,20 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   registers hashed); each phone is also repeatable run to run.
 - Consoles now run in parallel by default, netplay included (debug flag 2 = serial). Netplay title screen:
   ~10-11 ms per frame on both phones (well under the 16.7 ms budget), 0 desyncs.
+
+#### First played cup (2026-11-12)
+- ~10 minutes / 35,000+ frames of a played Grand Prix over home Wi-Fi: 590 hash checks, 0 desyncs.
+- Speed: ~19 ms per frame on both phones during races (~52 fps). On the S23 the two consoles take ~9.4 ms
+  each and do not overlap (mirror wait ~9.3 ms after the primary), so during wireless play they effectively run
+  one after the other: the in-process link makes them wait on each other packet by packet.
+- Latency: 4 frames of input delay at ~52 fps plus Wi-Fi felt too high.
+- Freeze after the cup: both phones froze identically (still in sync, emulation running, ARM9 in its idle loop),
+  so the emulated wireless session hung, not the netplay sync. Needs investigation.
+
+#### Lag and speed (2026-11-12)
+- During wireless play the two consoles wait on each other ~5 / ~33 times per frame (one MP exchange each);
+  that ordering is inherent to the protocol, so they can overlap only a little. Spinning before sleeping did
+  not change it (kept: harmless, results identical).
+- Threaded 3D rendering is deterministic after the divider/sqrt fix (replays identical to non-threaded and
+  S23 = Odin on all 8509 frames). It is the default again: race frames ~18 ms -> ~10 ms on the S23.
+- Default input delay lowered from 4 to 2 frames (~33 ms).
