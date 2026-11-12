@@ -176,3 +176,16 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   One mismatch at frame 0 (console 0) that did not persist. The S23 is the slower side (~55 fps with two
   consoles), so the Odin waits ~25% of the time.
 - Not done yet: resync on desync, playing a real cup (gate), UI.
+
+#### Speed work (2026-11-12)
+- Debug builds compiled the core at -O0. Build with `-PoptimizedNative` (added to app/build.gradle.kts) to get
+  an optimised core in debug builds: replays went from ~285 s to ~85 s (8509 frames, ~100 fps with both
+  consoles in parallel). Netplay title screen ~49 fps with the consoles taking turns.
+- Frame time breakdown (S23, title screen, serial): ~8 ms per console, network wait negligible. Running the
+  consoles in parallel is the main remaining speed win.
+- Fixed three timing races in parallel mode: late MP replies counted, late host packets counted, and a console
+  briefly looking "parked" at the previous frame end when a frame started (the deadlock rule released the other
+  console early). With these, the Odin's parallel replays are repeatable for all 8509 frames.
+- Still open: on the S23, parallel replays differ from frame 0 on both consoles (serial is fine). Something
+  S23-specific remains racy; capture mode (slow) hides it. Debug flag 64 (no-op hook between JIT blocks) did
+  not change it, so it is not the JIT trace hook effect.

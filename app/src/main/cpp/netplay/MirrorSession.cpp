@@ -6,6 +6,7 @@
 #include "NetplayLink.h"
 #include "NDSCart.h"
 #include <time.h>
+#include <chrono>
 #include <zlib.h>
 #include "MelonInstance.h"
 #include "net/MPInterface.h"
@@ -25,6 +26,15 @@ using namespace melonDS;
 
 namespace MelonDSAndroid
 {
+
+// DEBUG: frame time breakdown, logged every 300 frames
+static double accNet = 0, accPrimary = 0, accMirror = 0;
+// DEBUG experiment (flag 64): a call between JIT blocks that does nothing
+static void noopHook(melonDS::ARM*, melonDS::u32) {}
+static double msSince(std::chrono::steady_clock::time_point t)
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
 
 MirrorSession::~MirrorSession()
 {
@@ -115,6 +125,7 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
 
     installLink();
     forceSilentMic = true;
+    melonDS::JitTraceHook9 = (debugFlags & 64) ? noopHook : nullptr;
     primary->setInputHook([this](FrameInput& input) { inputHook(0, input); });
     mirror->setInputHook([this](FrameInput& input) { inputHook(1, input); });
 
@@ -416,6 +427,7 @@ static void traceHook(melonDS::ARM* cpu, u32 addr)
     gTrace[i].insert(gTrace[i].end(), rec, rec + kTraceWords);
 }
 
+
 static std::vector<std::string> readLines(const std::string& path)
 {
     std::vector<std::string> lines;
@@ -437,7 +449,10 @@ u32 MirrorSession::runFrame()
 {
     handleRecordingRequest();
     handleNetRequest();
-    if (net && !netBeforeFrame())
+    auto frameStart = std::chrono::steady_clock::now();
+    bool netGo = !net || netBeforeFrame();
+    accNet += msSince(frameStart);
+    if (!netGo)
         return 263; // connecting or syncing: hold the consoles still
     bool netRunning = netPhase.load() == NetPhase::Running;
 
@@ -478,19 +493,26 @@ u32 MirrorSession::runFrame()
     // Consoles run one after the other: running them concurrently has a timing race that makes replays
     // unrepeatable (see docs/netplay-plan.md). DEBUG flag 32 brings back the concurrent mode.
     bool serial = (debugFlags & 32) == 0 || netRunning;
-    if (!serial)
-        kickMirror();
-
+    // Both consoles are marked running before either starts: otherwise one can briefly look parked at the
+    // previous frame end and the deadlock rule would release the other early, depending on thread timing
     mp->setAtBarrier(primary->getInstanceId(), false);
+    if (!serial)
+    {
+        mp->setAtBarrier(mirror->getInstanceId(), false);
+        kickMirror();
+    }
+
+    auto tPrimary = std::chrono::steady_clock::now();
     u32 lines = primary->runFrame();
+    accPrimary += msSince(tPrimary);
     if (serial)
     {
         mp->setAtBarrier(primary->getInstanceId(), true);
         kickMirror();
     }
-    waitForMirror();
+    { auto t = std::chrono::steady_clock::now(); waitForMirror(); accMirror += msSince(t); }
     if (capture)
-        melonDS::JitTraceHook9 = nullptr;
+        melonDS::JitTraceHook9 = (debugFlags & 64) ? noopHook : nullptr;
 
     if (recMode.load() != RecMode::Off && hashFile)
     {
@@ -531,6 +553,16 @@ u32 MirrorSession::runFrame()
     if (netRunning && netPhase.load() == NetPhase::Running)
         netAfterFrame();
 
+    {
+        static double accTotal = 0; static int accN = 0;
+        accTotal += msSince(frameStart); accN++;
+        if (accN == 300)
+        {
+            LOGI("timing (ms/frame avg of 300): total %.2f | net wait %.2f | primary %.2f | mirror %.2f | rest %.2f",
+                 accTotal / 300, accNet / 300, accPrimary / 300, accMirror / 300, (accTotal - accNet - accPrimary - accMirror) / 300);
+            accTotal = accNet = accPrimary = accMirror = 0; accN = 0;
+        }
+    }
     if ((framesRequested % 300) == 1)
         LOGI("frame %llu: primary NumFrames %u PC %08x keys %03x | mirror NumFrames %u PC %08x keys %03x running %d",
              (unsigned long long) framesRequested,

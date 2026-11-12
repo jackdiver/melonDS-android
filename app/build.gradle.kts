@@ -57,6 +57,15 @@ android {
         }
         getByName("debug") {
             applicationIdSuffix = ".dev"
+            // -PoptimizedNative: build the emulator core optimised in debug builds (needed for netplay testing,
+            // which runs two consoles per device; -O0 is several times slower)
+            if (project.hasProperty("optimizedNative")) {
+                externalNativeBuild {
+                    cmake {
+                        arguments += "-DCMAKE_BUILD_TYPE=Release"
+                    }
+                }
+            }
         }
     }
 

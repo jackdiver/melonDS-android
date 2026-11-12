@@ -128,11 +128,13 @@ bool DeterministicMP::repliedLocked(int inst) const
 bool DeterministicMP::hostWaitSatisfiedLocked(int inst)
 {
     // Mirrors the wait condition in RecvHostPacket
+    // Only packets sent before the timeout count; whether a later one is already queued depends on thread timing
     const Instance& me = instances[inst];
-    int index = earliestPacketLocked(inst, false, 0);
+    uint64_t deadline = me.waitTime + kHostPacketTimeout;
+    int index = earliestPacketLocked(inst, true, deadline);
     if (index >= 0 && othersAtLeastLocked(inst, me.inbox[index].time))
         return true;
-    return othersAtLeastLocked(inst, me.waitTime + kHostPacketTimeout);
+    return othersAtLeastLocked(inst, deadline);
 }
 
 void DeterministicMP::resolveDeadlockLocked()
@@ -385,7 +387,7 @@ int DeterministicMP::RecvHostPacket(int inst, u8* data, u64* timestamp)
     waitFor(lock, inst, deadline, [&] { return hostWaitSatisfiedLocked(inst); });
     me.waitingForHost = false;
 
-    int index = earliestPacketLocked(inst, false, 0);
+    int index = earliestPacketLocked(inst, true, deadline);
     if (index >= 0 && othersAtLeastLocked(inst, me.inbox[index].time))
         return deliverLocked(inst, index, data, timestamp);
     return 0;
@@ -428,7 +430,7 @@ u16 DeterministicMP::RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask)
 
     std::vector<const Packet*> ordered;
     for (const Packet& p : replies)
-        if (p.time >= roundTime)
+        if (p.time >= roundTime && p.time < deadline) // late replies depend on thread timing: never count them
             ordered.push_back(&p);
     std::sort(ordered.begin(), ordered.end(), [](const Packet* a, const Packet* b) { return packetBefore(*a, *b); });
 
