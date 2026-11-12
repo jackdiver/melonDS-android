@@ -9,7 +9,7 @@
 #include <thread>
 #include <vector>
 #include "types.h"
-#include "DeterminismHarness.h"
+#include "NetplayCommon.h"
 #include "AREngine.h"
 #include "NetplayLink.h"
 
@@ -22,12 +22,10 @@ class MelonInstance;
 class DeterministicMP;
 
 /**
- * Runs the primary console plus a hidden "mirror" console in lockstep frames, linked by DeterministicMP.
- *
- * Phase 2 of docs/netplay-plan.md: both consoles live on one device. The mirror runs on its own thread
- * (local wireless needs both to progress concurrently) and always renders in software.
- * A focus switch decides which console is shown and receives touch/button input; the other gets
- * neutral input. In phase 3 the mirror's input will come from the network instead.
+ * Runs two consoles on one device in lockstep frames, linked by DeterministicMP (docs/netplay-plan.md):
+ * the device's own console (primary, shown and controlled here) and the other player's console (mirror), whose
+ * input arrives over the network. The mirror runs on its own thread because local wireless needs both consoles
+ * to progress concurrently. Software rendering only: the picture must be identical on every device.
  */
 class MirrorSession
 {
@@ -42,14 +40,7 @@ public:
     // Emulator thread: runs one frame on both consoles.
     melonDS::u32 runFrame();
 
-    // Two-console determinism check (thread-safe requests, executed at the next frame boundary).
-    // Record: snapshot both consoles, reload them (cold JIT), reset the link, then log both inputs + hashes.
-    // Replay: load both snapshots, reset the link, feed the recorded inputs and log hashes.
-    void requestRecord(const std::string& directory);
-    void requestReplay(const std::string& directory, const std::string& tag);
-    void requestStopRecording();
-
-    // Phase 3: two-device netplay (debug commands for now). Host = console 0, joiner = console 1.
+    // Manual start from the Local multiplayer screen. Host = console 0, joiner = console 1.
     void requestNetHost(int port, int inputDelay);
     void requestNetJoin(const std::string& address, int port, int inputDelay);
     void requestNetStop();
@@ -62,9 +53,7 @@ public:
     bool shouldEnd() const { return active && netAutoStop && !net; }
     // Thread-safe summary for the UI: "<phase> <frame> <desyncs> <message>"
     std::string netStatus();
-    void setNetRecordDir(const std::string& dir) { netRecDir = dir; }
 
-    void setDebugFlags(int flags) { debugFlags = flags; }
     void setFocus(int index);
     int getFocus() const { return focus.load(); }
     MelonInstance* inputTarget();
@@ -72,13 +61,9 @@ public:
     MelonInstance* getInstanceUnchecked(int index);
 
 private:
-    static void setFastMemory(melonDS::NDS* nds, bool enabled);
     static void setThreadedRendering(melonDS::NDS* nds, bool threaded);
     void installLink();
-    void handleRecordingRequest();
-    bool snapshotAndReload(int index, const std::string& path, bool save);
     void inputHook(int index, FrameInput& input);
-    void stopRecording(const char* reason);
     void workerLoop();
     void waitForMirror();
 
@@ -98,8 +83,6 @@ private:
     bool saveStateTo(int index, std::vector<uint8_t>& out);
     bool loadStateFresh(int index, const uint8_t* data, size_t size);
     uint32_t romHash();
-    void netRecordStates(const uint8_t* s0, size_t n0, const uint8_t* s1, size_t n1);
-    void netRecordOpenInputs();
 
     std::shared_ptr<MelonInstance> primary;
     std::shared_ptr<MelonInstance> mirror;
@@ -107,7 +90,6 @@ private:
 
     std::atomic<bool> active { false };
     std::atomic<int> focus { 0 };
-    std::atomic<int> debugFlags { 0 };
 
     std::thread worker;
     std::mutex mutex;
@@ -117,20 +99,6 @@ private:
     bool waitedThisFrame = false;
     bool quit = false;
 
-    // Recording / replay (two-console determinism check)
-    enum class RecMode { Off, Record, Replay };
-    enum class RecRequest { None, Record, Replay, Stop };
-    std::mutex recRequestMutex;
-    std::atomic<RecRequest> recRequest { RecRequest::None };
-    std::string recRequestDir;
-    std::string recRequestTag;
-    std::atomic<RecMode> recMode { RecMode::Off };
-    FILE* inputFiles[2] = { nullptr, nullptr };
-    FILE* hashFile = nullptr;
-    std::atomic<bool> replayEnded { false };
-    uint32_t recFrame = 0;
-    std::string recDir;
-    std::string recTag;
     // Netplay state (emulator thread, except the request fields)
     std::unique_ptr<NetplayLink> net;
     std::mutex netRequestMutex;
@@ -158,20 +126,12 @@ private:
     std::atomic<uint32_t> netFrameShown { 0 };
     std::atomic<uint32_t> netDesyncsShown { 0 };
     std::string netMessage; // last end reason or error (netRequestMutex)
-    std::string netRecDir;
-    struct NetDump { uint32_t frame = 0; std::vector<uint8_t> ram[2]; };
-    std::vector<NetDump> netDumps;
     // Session ids (host console = 0). Default 0/1; a joiner started from the lobby runs its own console as 1.
     int sidPrimary = 0;
     int sidMirror = 1;
     bool netAutoStop = false;
     std::vector<melonDS::ARCode> savedCheats;
     MelonInstance* consoleBySession(int sid) { return sid == sidPrimary ? primary.get() : mirror.get(); }
-    FILE* netRecInputs[2] = { nullptr, nullptr };
-
-    std::vector<std::string> refHashes;   // DEBUG capture
-    std::vector<uint32_t> dumpFrames;
-    int capturesWritten = 0;
 };
 
 }

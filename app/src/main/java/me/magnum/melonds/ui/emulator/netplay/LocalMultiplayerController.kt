@@ -102,7 +102,7 @@ class LocalMultiplayerController(
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 if (ensureLocalNetworkPermission()) {
-                    MelonDSAndroidInterface.mirrorStart(0)
+                    MelonDSAndroidInterface.mirrorStart()
                     MelonDSAndroidInterface.netHost(PORT, INPUT_DELAY)
                     toast(if (ownAddress != null) "Hosting. On the other device, join $ownAddress" else "Hosting")
                     startPolling()
@@ -117,7 +117,7 @@ class LocalMultiplayerController(
                 }
                 if (ensureLocalNetworkPermission()) {
                     prefs.edit { putString(PREF_LAST_HOST, address) }
-                    MelonDSAndroidInterface.mirrorStart(0)
+                    MelonDSAndroidInterface.mirrorStart()
                     MelonDSAndroidInterface.netJoin(address, PORT, INPUT_DELAY)
                     startPolling()
                     dialog.dismiss()

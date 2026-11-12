@@ -30,10 +30,6 @@ namespace MelonDSAndroid
 const int kRewindBufferSize = 1024 * 1024 * 20; // Use 20MB per savestate
 const int kRewindScreenshotSize = 256 * 384 * 4;
 
-std::atomic<int> MelonInstance::debugInputFrames { 0 };
-std::atomic<u32> MelonInstance::debugInputKeys { 0 };
-std::atomic<u32> MelonInstance::debugInputTouch { 0 };
-
 MelonInstance::MelonInstance(int instanceId, std::shared_ptr<EmulatorConfiguration> configuration, std::unique_ptr<melonDS::NDSArgs> args, std::shared_ptr<Net> net, std::unique_ptr<ScreenshotRenderer> screenshotRenderer, int consoleType) :
     instanceId(instanceId),
     currentConfiguration(configuration),
@@ -366,7 +362,6 @@ u32 MelonInstance::runFrame()
 
     applyFrameInput();
     u32 nLines = nds->RunFrame();
-    determinismHarness.afterFrame(nds);
     retroAchievementsManager->FrameUpdate();
 
     if (!isRendererAccelerated)
@@ -437,7 +432,7 @@ u32 MelonInstance::runFrameHeadless()
         isRenderConfigurationDirty = false;
     }
 
-    applyFrameInput(false);
+    applyFrameInput();
     u32 nLines = nds->RunFrame();
     frame++;
     return nLines;
@@ -485,7 +480,7 @@ bool MelonInstance::cloneFrom(MelonInstance& source)
     nds->SetupDirectBoot(romName);
     nds->Start();
 
-    // Copy the emulated state. Loaded directly into the core (no RTC resync), see DeterminismHarness.
+    // Copy the emulated state. Loaded directly into the core (no RTC resync), so the clone matches the original exactly.
     Savestate state;
     {
         ScopedCurrentNds sourceGuard(source.nds);
@@ -559,7 +554,7 @@ void MelonInstance::releaseKey(u32 key)
         inputMask.fetch_or(1u << key);
 }
 
-void MelonInstance::applyFrameInput(bool useHarness)
+void MelonInstance::applyFrameInput()
 {
     u32 touch = touchState.load();
     FrameInput input {
@@ -571,26 +566,9 @@ void MelonInstance::applyFrameInput(bool useHarness)
         .reserved = {0, 0},
     };
 
-    // Test automation (debug builds): input injected directly for a number of frames, applied on top of the
-    // frontend's input so nothing (on-screen controls, gamepads) can override it
-    if (instanceId == 0 && debugInputFrames.load() > 0)
-    {
-        input.keyMask &= ~debugInputKeys.load();
-        u32 t = debugInputTouch.load();
-        if (t & 0x80000000)
-        {
-            input.touchX = (t >> 16) & 0xFFF;
-            input.touchY = t & 0xFFF;
-            input.touching = 1;
-        }
-        debugInputFrames--;
-    }
-
-    // The determinism harness may record this input or replace it with recorded input
+    // A netplay session replaces the live input with the (delayed, synchronised) input of its frame
     if (inputHook)
         inputHook(input);
-    else if (useHarness)
-        determinismHarness.beforeFrame(nds, input);
 
     nds->SetKeyMask(input.keyMask);
     if (input.touching)

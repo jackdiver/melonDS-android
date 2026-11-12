@@ -43,7 +43,6 @@ namespace MelonDSAndroid
     std::shared_ptr<MelonInstance> instance;
     MirrorSession mirrorSession;
     std::atomic<int> pendingMirrorRequest { 0 }; // 1 = start, 2 = stop
-    int mirrorDebugFlags = 0; // DEBUG: 1 = mirror uses interpreter, 2 = run consoles one after the other
 
     bool setupOpenGlContext();
     void cleanupOpenGlContext();
@@ -225,9 +224,6 @@ namespace MelonDSAndroid
         auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, 1);
         if (!mirrorArgs.has_value())
             return nullptr;
-        // DEBUG experiment switch: mirror on the interpreter
-        if (mirrorDebugFlags & 1)
-            mirrorArgs.value()->JIT = std::nullopt;
         return std::make_shared<MelonInstance>(
             1,
             currentConfiguration,
@@ -254,16 +250,11 @@ namespace MelonDSAndroid
         }
     }
 
-    void requestMirrorStart(int debugFlags) { mirrorStartFailed = false; mirrorDebugFlags = debugFlags; mirrorSession.setDebugFlags(debugFlags); pendingMirrorRequest = 1; }
+    void requestMirrorStart() { mirrorStartFailed = false; pendingMirrorRequest = 1; }
     void requestMirrorStop() { pendingMirrorRequest = 2; }
-    void setMirrorFocus(int index) { mirrorSession.setFocus(index); }
-    void requestMirrorRecord(std::string directory) { mirrorSession.requestRecord(directory); }
-    void requestMirrorReplay(std::string directory, std::string tag) { mirrorSession.requestReplay(directory, tag); }
-    void requestMirrorRecordStop() { mirrorSession.requestStopRecording(); }
     void requestNetHost(int port, int inputDelay) { mirrorSession.requestNetHost(port, inputDelay); }
     void requestNetJoin(std::string address, int port, int inputDelay) { mirrorSession.requestNetJoin(address, port, inputDelay); }
     void requestNetStop() { mirrorSession.requestNetStop(); }
-    void setNetRecordDir(std::string dir) { mirrorSession.setNetRecordDir(dir); }
     std::string getNetStatus()
     {
         if (mirrorStartFailed)

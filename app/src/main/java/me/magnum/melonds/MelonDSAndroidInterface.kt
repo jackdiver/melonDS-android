@@ -7,28 +7,14 @@ object MelonDSAndroidInterface {
     external fun getEmulatorGlContext(): Long
     external fun cleanup()
 
-    // Netplay phase 1: determinism test harness (see docs/netplay-plan.md)
-    external fun determinismRecord(directory: String)
-    external fun determinismReplay(directory: String, tag: String)
-    external fun determinismStop()
-    external fun determinismSelfTest(frames: Int)
-
-    // Netplay phase 2 (debug): hidden second console in the same process
-    external fun mirrorStart(debugFlags: Int)
+    // Local multiplayer over Wi-Fi (see docs/netplay-plan.md). Sessions normally start from the game's own
+    // wireless menus; these calls back the manual Host / Join buttons of the Local multiplayer screen.
+    external fun mirrorStart()
     external fun mirrorStop()
-    external fun mirrorFocus(index: Int)
-    external fun mirrorRecord(directory: String)
-    external fun mirrorReplay(directory: String, tag: String)
-    external fun mirrorRecordStop()
-
-    // Netplay phase 3 (debug): two devices over the network
     external fun netHost(port: Int, inputDelay: Int)
     external fun netJoin(address: String, port: Int, inputDelay: Int)
     external fun netStop()
-    // "<phase> <frame> <desyncs> <message>"; phase is off|waiting|connecting|syncing|running|error
+
+    // "<phase> <frame> <desyncs> <message>"; phase is idle|hosting|searching|joining|waiting|connecting|syncing|running|error
     external fun netStatus(): String
-    // Debug: record every netplay session (start states + inputs) into <dir>/netrec
-    external fun setNetRecordDir(directory: String)
-    // Debug: hold DS keys (bit = key index) and/or a touch for a number of frames, injected inside the emulator
-    external fun debugInput(keys: Int, touching: Boolean, x: Int, y: Int, frames: Int)
 }

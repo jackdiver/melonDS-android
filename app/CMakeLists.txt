@@ -55,7 +55,7 @@ add_library(
         ${ANDROID-CPP}/SDCardArgsBuilder.cpp
         ${ANDROID-CPP}/SaveManager.cpp
         ${ANDROID-CPP}/UriFileHandler.cpp
-        ${ANDROID-CPP}/netplay/DeterminismHarness.cpp
+        ${ANDROID-CPP}/netplay/NetplayCommon.cpp
         ${ANDROID-CPP}/netplay/DeterministicMP.cpp
         ${ANDROID-CPP}/netplay/MirrorSession.cpp
         ${ANDROID-CPP}/netplay/NetplayLink.cpp

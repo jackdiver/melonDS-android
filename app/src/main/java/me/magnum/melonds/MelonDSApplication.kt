@@ -38,65 +38,6 @@ class MelonDSApplication : Application(), Configuration.Provider {
         applyTheme()
         performMigrations()
         MelonDSAndroidInterface.setup(UriFileHandler(this, uriHandler))
-        registerDeterminismTestReceiver()
-    }
-
-    /**
-     * Debug builds only: drive the netplay determinism harness from a PC (see docs/netplay-plan.md).
-     *   adb shell am broadcast -p <package> -a me.magnum.melonds.NETPLAY_TEST --es cmd record
-     *   adb shell am broadcast -p <package> -a me.magnum.melonds.NETPLAY_TEST --es cmd replay --es tag s23
-     *   adb shell am broadcast -p <package> -a me.magnum.melonds.NETPLAY_TEST --es cmd stop
-     * Files live in <filesDir>/netplay-test (readable with `adb shell run-as <package>`).
-     */
-    private fun registerDeterminismTestReceiver() {
-        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return
-        MelonDSAndroidInterface.setNetRecordDir(java.io.File(filesDir, "netplay-test").apply { mkdirs() }.absolutePath)
-
-        val receiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
-                val dir = java.io.File(filesDir, "netplay-test").apply { mkdirs() }.absolutePath
-                when (intent.getStringExtra("cmd")) {
-                    "record" -> MelonDSAndroidInterface.determinismRecord(dir)
-                    "replay" -> MelonDSAndroidInterface.determinismReplay(dir, intent.getStringExtra("tag") ?: "replay")
-                    "stop" -> MelonDSAndroidInterface.determinismStop()
-                    "selftest" -> MelonDSAndroidInterface.determinismSelfTest(intent.getIntExtra("frames", 300))
-                    "mirror-start" -> MelonDSAndroidInterface.mirrorStart(intent.getIntExtra("debug", 0))
-                    "mirror-stop" -> MelonDSAndroidInterface.mirrorStop()
-                    "focus" -> MelonDSAndroidInterface.mirrorFocus(intent.getIntExtra("index", 0))
-                    "mirror-record" -> MelonDSAndroidInterface.mirrorRecord(dir)
-                    "mirror-replay" -> MelonDSAndroidInterface.mirrorReplay(dir, intent.getStringExtra("tag") ?: "replay")
-                    "mirror-recstop" -> MelonDSAndroidInterface.mirrorRecordStop()
-                    "net-host" -> MelonDSAndroidInterface.netHost(intent.getIntExtra("port", 7064), intent.getIntExtra("delay", 2))
-                    "net-join" -> MelonDSAndroidInterface.netJoin(intent.getStringExtra("ip") ?: "", intent.getIntExtra("port", 7064), intent.getIntExtra("delay", 2))
-                    "net-stop" -> MelonDSAndroidInterface.netStop()
-                    // Test automation: press a DS button or touch the DS bottom screen (0-255, 0-191) for `ms`
-                    "key" -> {
-                        val input = me.magnum.melonds.domain.model.Input.valueOf(intent.getStringExtra("key") ?: "A")
-                        MelonEmulator.onInputDown(input)
-                        android.os.Handler(mainLooper).postDelayed({ MelonEmulator.onInputUp(input) }, intent.getIntExtra("ms", 150).toLong())
-                    }
-                    // Frame-level injection (works regardless of controller/overlay handling): --es keys A,DOWN
-                    // and/or --ei x --ei y (touch), held for --ei frames (default 20)
-                    "press" -> {
-                        val mask = (intent.getStringExtra("keys") ?: "").split(",").filter { it.isNotBlank() }
-                            .mapNotNull { name -> me.magnum.melonds.domain.model.Input.entries.firstOrNull { it.name == name.trim() } }
-                            .fold(0) { acc, input -> acc or (1 shl input.keyCode) }
-                        val touching = intent.hasExtra("x")
-                        MelonDSAndroidInterface.debugInput(mask, touching, intent.getIntExtra("x", 0), intent.getIntExtra("y", 0), intent.getIntExtra("frames", 20))
-                    }
-                    "touch" -> {
-                        MelonEmulator.onScreenTouch(intent.getIntExtra("x", 128), intent.getIntExtra("y", 96))
-                        android.os.Handler(mainLooper).postDelayed({ MelonEmulator.onScreenRelease() }, intent.getIntExtra("ms", 150).toLong())
-                    }
-                }
-            }
-        }
-        androidx.core.content.ContextCompat.registerReceiver(
-            this,
-            receiver,
-            android.content.IntentFilter("me.magnum.melonds.NETPLAY_TEST"),
-            androidx.core.content.ContextCompat.RECEIVER_EXPORTED,
-        )
     }
 
     private fun createNotificationChannels() {

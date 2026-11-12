@@ -1,9 +1,7 @@
-﻿#include "JniEnvHandler.h"
+#include "JniEnvHandler.h"
 #include "UriFileHandler.h"
 #include "MelonDS.h"
-#include "MelonInstance.h"
 #include "OpenGLContext.h"
-#include "netplay/DeterminismHarness.h"
 
 #include <string>
 #include <dlfcn.h>
@@ -59,51 +57,15 @@ Java_me_magnum_melonds_MelonDSAndroidInterface_setup(JNIEnv* env, jobject thiz, 
 }
 
 JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_determinismRecord(JNIEnv* env, jobject thiz, jstring directory)
+Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorStart(JNIEnv* env, jobject thiz)
 {
-    MelonDSAndroid::determinismHarness.requestRecord(jstringToString(env, directory));
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_determinismReplay(JNIEnv* env, jobject thiz, jstring directory, jstring tag)
-{
-    MelonDSAndroid::determinismHarness.requestReplay(jstringToString(env, directory), jstringToString(env, tag));
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_determinismStop(JNIEnv* env, jobject thiz)
-{
-    MelonDSAndroid::determinismHarness.requestStop();
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorStart(JNIEnv* env, jobject thiz, jint debugFlags)
-{
-    MelonDSAndroid::requestMirrorStart(debugFlags);
+    MelonDSAndroid::requestMirrorStart();
 }
 
 JNIEXPORT void JNICALL
 Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorStop(JNIEnv* env, jobject thiz)
 {
     MelonDSAndroid::requestMirrorStop();
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorRecord(JNIEnv* env, jobject thiz, jstring directory)
-{
-    MelonDSAndroid::requestMirrorRecord(jstringToString(env, directory));
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorReplay(JNIEnv* env, jobject thiz, jstring directory, jstring tag)
-{
-    MelonDSAndroid::requestMirrorReplay(jstringToString(env, directory), jstringToString(env, tag));
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorRecordStop(JNIEnv* env, jobject thiz)
-{
-    MelonDSAndroid::requestMirrorRecordStop();
 }
 
 JNIEXPORT void JNICALL
@@ -124,34 +86,10 @@ Java_me_magnum_melonds_MelonDSAndroidInterface_netStop(JNIEnv* env, jobject thiz
     MelonDSAndroid::requestNetStop();
 }
 
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_setNetRecordDir(JNIEnv* env, jobject thiz, jstring directory)
-{
-    MelonDSAndroid::setNetRecordDir(jstringToString(env, directory));
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_debugInput(JNIEnv* env, jobject thiz, jint keys, jboolean touching, jint x, jint y, jint frames)
-{
-    MelonDSAndroid::MelonInstance::setDebugInput((melonDS::u32) keys, touching, x, y, frames);
-}
-
 JNIEXPORT jstring JNICALL
 Java_me_magnum_melonds_MelonDSAndroidInterface_netStatus(JNIEnv* env, jobject thiz)
 {
     return env->NewStringUTF(MelonDSAndroid::getNetStatus().c_str());
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorFocus(JNIEnv* env, jobject thiz, jint index)
-{
-    MelonDSAndroid::setMirrorFocus(index);
-}
-
-JNIEXPORT void JNICALL
-Java_me_magnum_melonds_MelonDSAndroidInterface_determinismSelfTest(JNIEnv* env, jobject thiz, jint frames)
-{
-    MelonDSAndroid::determinismHarness.requestSelfTest(frames);
 }
 
 JNIEXPORT jlong JNICALL

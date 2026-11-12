@@ -1,7 +1,6 @@
 #include "DeterministicMP.h"
 
 #include <algorithm>
-#include <chrono>
 #include <android/log.h>
 #include <cstring>
 #include <limits>
@@ -102,12 +101,6 @@ void DeterministicMP::setAtBarrier(int inst, bool atBarrier)
     }
 }
 
-void DeterministicMP::takeWaitStats(uint32_t count[2], double ms[2])
-{
-    std::lock_guard<std::mutex> lock(mutex);
-    for (int i = 0; i < 2; i++) { count[i] = statWaits[i]; ms[i] = statWaitMs[i]; statWaits[i] = 0; statWaitMs[i] = 0; }
-}
-
 void DeterministicMP::markConnected(int inst)
 {
     inst = toSession(inst);
@@ -150,7 +143,6 @@ void DeterministicMP::publishLocked(int inst, uint64_t time)
 void DeterministicMP::changedLocked()
 {
     epoch++;
-    epochPublished.store(epoch, std::memory_order_release);
     cv.notify_all();
 }
 
@@ -241,10 +233,6 @@ bool DeterministicMP::waitFor(std::unique_lock<std::mutex>& lock, int inst, uint
         }
         if (me.forced || shuttingDown)
         {
-            if (me.forced && inst < 2 && ++statForced[inst] <= 400)
-                LOGI("forced release: inst %d at %llu (deadline %llu, other published %llu, other state %d)", inst,
-                     (unsigned long long) (instances[inst].nds->GetSysClockCycles(0) - instances[inst].base), (unsigned long long) deadline,
-                     (unsigned long long) instances[1 - inst].published, (int) instances[1 - inst].state);
             me.forced = false;
             me.state = State::Running;
             changedLocked();
@@ -256,30 +244,7 @@ bool DeterministicMP::waitFor(std::unique_lock<std::mutex>& lock, int inst, uint
         if (me.forced)
             continue;
 
-        {
-            auto t0 = std::chrono::steady_clock::now();
-            // Spin briefly before sleeping: the other console usually moves on within microseconds, and waking a
-            // sleeping thread costs ~0.25 ms on Android, which made the two consoles effectively take turns.
-            // Only affects how fast a change is noticed, never what is decided.
-            uint64_t seen = epoch;
-            lock.unlock();
-            bool changed = false;
-            for (int spin = 0; !changed; spin++)
-            {
-                if (epochPublished.load(std::memory_order_acquire) != seen) { changed = true; break; }
-                if ((spin & 63) == 63 && std::chrono::steady_clock::now() - t0 > std::chrono::microseconds(kSpinMicros))
-                    break;
-                __asm__ __volatile__("yield");
-            }
-            lock.lock();
-            if (!changed && epoch == seen)
-                cv.wait(lock);
-            if (inst < 2)
-            {
-                statWaits[inst]++;
-                statWaitMs[inst] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-            }
-        }
+        cv.wait(lock);
     }
 }
 
@@ -468,10 +433,7 @@ int DeterministicMP::RecvHostPacket(int inst, u8* data, u64* timestamp)
             return instances[host].published >= t || instances[host].endTime != UINT64_MAX;
         });
         if (instances[host].endTime <= t)
-        {
-            LOGI("inst %d: host %d left at %llu (now %llu)", inst, host, (unsigned long long) instances[host].endTime, (unsigned long long) t);
             return -1;
-        }
     }
 
     uint64_t deadline = t + kHostPacketTimeout;

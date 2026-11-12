@@ -23,7 +23,6 @@
 #include "performancehint/PerformanceHintManagerFactory.h"
 
 #include "Platform.h"
-#include "netplay/DeterminismHarness.h"
 
 enum GbaSlotType {
     NONE = 0,
@@ -662,7 +661,7 @@ void* emulate(void*)
         if (frameTimeStep < 1)
             frameTimeStep = 1;
 
-        if (limitFps && !MelonDSAndroid::unthrottleForReplay.load())
+        if (limitFps)
         {
             frameLimitError += frameTimeStep - delay;
             if (frameLimitError < -frameTimeStep)

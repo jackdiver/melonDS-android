@@ -585,8 +585,8 @@ namespace Platform
 
     int Mic_ReadInput(s16* data, int maxlength, void* userdata)
     {
-        // Real microphone noise differs between devices; feed silence while checking determinism
-        if (MelonDSAndroid::determinismHarness.isActive() || MelonDSAndroid::forceSilentMic.load())
+        // Real microphone noise differs between devices: a netplay session feeds silence
+        if (MelonDSAndroid::forceSilentMic.load())
         {
             memset(data, 0, maxlength * sizeof(s16));
             return maxlength;

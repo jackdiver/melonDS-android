@@ -253,3 +253,14 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - The brief early desync seen once during the clash test (console 1, frames 0-120) did not come back in a later run
   (snapshots of frames 0/60/120/180 byte-identical on both devices); that run still used the old change-the-MAC path,
   which is now removed.
+
+#### Cleanup (2026-11-12)
+- All test and debug tooling was removed from the app and the core: record/replay harness and self test, RAM dumps and
+  desync/early snapshots, per-session recording, the JIT trace hook (core), debug flags and JIT experiments, frame
+  timing and link statistics, the spin-wait in the link, the frame-limiter bypass, the in-emulator input injection and
+  the whole `NETPLAY_TEST` broadcast receiver.
+- Kept: `NetplayCommon` (input record, silent microphone flag, state hash for desync detection), the lobby, the
+  deterministic link (with MAC translation), the session, and the Local multiplayer screen (manual Host / Join as a
+  fallback). The `-PoptimizedNative` build switch stays: it makes debug builds ~3x faster.
+- The full tooling, with the replay/diff workflow described above, is preserved at the git tag `netplay-debug-tools`
+  (in the app repo and in the core library); check it out to bring it back.
