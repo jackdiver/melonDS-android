@@ -71,6 +71,7 @@ namespace MelonDSAndroid {
     extern void requestNetHost(int port, int inputDelay);
     extern void requestNetJoin(std::string address, int port, int inputDelay);
     extern void requestNetStop();
+    extern std::string getNetStatus();
     extern Frame* getPresentationFrame(std::optional<std::chrono::time_point<std::chrono::steady_clock>> deadline);
     extern void pause();
     extern void resume();

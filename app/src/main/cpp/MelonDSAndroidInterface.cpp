@@ -123,6 +123,12 @@ Java_me_magnum_melonds_MelonDSAndroidInterface_netStop(JNIEnv* env, jobject thiz
     MelonDSAndroid::requestNetStop();
 }
 
+JNIEXPORT jstring JNICALL
+Java_me_magnum_melonds_MelonDSAndroidInterface_netStatus(JNIEnv* env, jobject thiz)
+{
+    return env->NewStringUTF(MelonDSAndroid::getNetStatus().c_str());
+}
+
 JNIEXPORT void JNICALL
 Java_me_magnum_melonds_MelonDSAndroidInterface_mirrorFocus(JNIEnv* env, jobject thiz, jint index)
 {

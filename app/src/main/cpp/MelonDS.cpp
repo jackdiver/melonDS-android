@@ -216,6 +216,8 @@ namespace MelonDSAndroid
         instance->start();
     }
 
+    std::atomic<bool> mirrorStartFailed { false };
+
     void handleMirrorRequest()
     {
         int request = pendingMirrorRequest.exchange(0);
@@ -235,7 +237,7 @@ namespace MelonDSAndroid
                 std::make_unique<ScreenshotRenderer>(nullptr),
                 currentConfiguration->consoleType
             );
-            mirrorSession.start(instance, mirror);
+            mirrorStartFailed = !mirrorSession.start(instance, mirror);
         }
         else if (request == 2)
         {
@@ -243,7 +245,7 @@ namespace MelonDSAndroid
         }
     }
 
-    void requestMirrorStart(int debugFlags) { mirrorDebugFlags = debugFlags; mirrorSession.setDebugFlags(debugFlags); pendingMirrorRequest = 1; }
+    void requestMirrorStart(int debugFlags) { mirrorStartFailed = false; mirrorDebugFlags = debugFlags; mirrorSession.setDebugFlags(debugFlags); pendingMirrorRequest = 1; }
     void requestMirrorStop() { pendingMirrorRequest = 2; }
     void setMirrorFocus(int index) { mirrorSession.setFocus(index); }
     void requestMirrorRecord(std::string directory) { mirrorSession.requestRecord(directory); }
@@ -252,6 +254,12 @@ namespace MelonDSAndroid
     void requestNetHost(int port, int inputDelay) { mirrorSession.requestNetHost(port, inputDelay); }
     void requestNetJoin(std::string address, int port, int inputDelay) { mirrorSession.requestNetJoin(address, port, inputDelay); }
     void requestNetStop() { mirrorSession.requestNetStop(); }
+    std::string getNetStatus()
+    {
+        if (mirrorStartFailed)
+            return "error 0 0 Local multiplayer needs the software video renderer (Settings > Video)";
+        return mirrorSession.netStatus();
+    }
 
     u32 loop()
     {

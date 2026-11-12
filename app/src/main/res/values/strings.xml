@@ -151,6 +151,7 @@
 
     <string name="pause">Pause</string>
     <string name="achievements">Achievements</string>
+    <string name="local_multiplayer">Local multiplayer</string>
     <string name="reset">Reset</string>
     <string name="exit">Exit</string>
 

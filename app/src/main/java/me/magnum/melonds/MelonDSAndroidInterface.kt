@@ -25,4 +25,6 @@ object MelonDSAndroidInterface {
     external fun netHost(port: Int, inputDelay: Int)
     external fun netJoin(address: String, port: Int, inputDelay: Int)
     external fun netStop()
+    // "<phase> <frame> <desyncs> <message>"; phase is off|waiting|connecting|syncing|running|error
+    external fun netStatus(): String
 }

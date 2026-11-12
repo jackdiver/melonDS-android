@@ -84,6 +84,7 @@ import me.magnum.melonds.ui.emulator.input.INativeInputListener
 import me.magnum.melonds.ui.emulator.input.InputProcessor
 import me.magnum.melonds.ui.emulator.input.MelonTouchHandler
 import me.magnum.melonds.ui.emulator.model.EmulatorOverlay
+import me.magnum.melonds.ui.emulator.netplay.LocalMultiplayerController
 import me.magnum.melonds.ui.emulator.model.EmulatorState
 import me.magnum.melonds.ui.emulator.model.EmulatorUiEvent
 import me.magnum.melonds.ui.emulator.model.LaunchArgs
@@ -281,6 +282,17 @@ class EmulatorActivity : AppCompatActivity() {
             presentation?.setPauseOverlayVisibility(true)
         }
     )
+
+    private val localMultiplayer by lazy {
+        LocalMultiplayerController(
+            activity = this,
+            onDialogShown = { activeOverlays.addActiveOverlay(EmulatorOverlay.LOCAL_MULTIPLAYER_DIALOG) },
+            onDialogClosed = {
+                activeOverlays.removeActiveOverlay(EmulatorOverlay.LOCAL_MULTIPLAYER_DIALOG)
+                viewModel.resumeEmulator()
+            },
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -517,6 +529,7 @@ class EmulatorActivity : AppCompatActivity() {
                                 }
                             }
                         }
+                        EmulatorUiEvent.ShowLocalMultiplayerDialog -> localMultiplayer.showDialog()
                         EmulatorUiEvent.ShowAchievementList -> {
                             activeOverlays.addActiveOverlay(EmulatorOverlay.ACHIEVEMENTS_DIALOG)
                             showAchievementList.value = true
@@ -1041,6 +1054,7 @@ class EmulatorActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        localMultiplayer.onDestroy()
         emulatorMotionManager.stop()
         frameRenderCoordinator.stop()
         presentation?.dismiss()

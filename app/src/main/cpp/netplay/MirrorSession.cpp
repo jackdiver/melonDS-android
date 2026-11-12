@@ -716,8 +716,16 @@ void MirrorSession::handleNetRequest()
     {
         net.reset();
         LOGE("netplay: could not %s", netIsHost ? "host" : "join");
+        std::lock_guard<std::mutex> lock(netRequestMutex);
+        netMessage = netIsHost ? "could not open the port" : "bad address";
         return;
     }
+    {
+        std::lock_guard<std::mutex> lock(netRequestMutex);
+        netMessage.clear();
+    }
+    netFrameShown = 0;
+    netDesyncsShown = 0;
     netPhase = netIsHost ? NetPhase::Listening : NetPhase::Connecting;
     LOGI("netplay: %s %s (port %d, input delay %d)", netIsHost ? "hosting" : "joining", address.c_str(), port, delay);
 }
@@ -726,6 +734,11 @@ void MirrorSession::netEnd(const char* reason)
 {
     if (netPhase.load() == NetPhase::Off && !net)
         return;
+    if (strcmp(reason, "new request") != 0)
+    {
+        std::lock_guard<std::mutex> lock(netRequestMutex);
+        netMessage = reason;
+    }
     if (netPhase.load() == NetPhase::Running)
         LOGI("netplay ended at frame %u: %s (hash checks %u, desyncs %u, total stall %llu ms)", netFrame, reason,
              netHashChecks, netDesyncs, (unsigned long long) netStallMs);
@@ -813,6 +826,11 @@ void MirrorSession::netOnPacket(const uint8_t* data, size_t size)
         netHelloOk = hash == romHash();
         if (!netHelloOk)
             LOGE("netplay: the other device has a different ROM (%08x vs %08x)", hash, romHash());
+        if (!netHelloOk)
+        {
+            std::lock_guard<std::mutex> lock(netRequestMutex);
+            netMessage = "the other device is running a different game";
+        }
         break;
     }
     case MsgState:
@@ -1041,6 +1059,7 @@ void MirrorSession::netAfterFrame()
         if (l.second != r.second)
         {
             netDesyncs++;
+            netDesyncsShown = netDesyncs;
             LOGE("netplay: DESYNC at frame %u (console 0 %s, console 1 %s)", l.first,
                  l.second.first == r.second.first ? "ok" : "differs", l.second.second == r.second.second ? "ok" : "differs");
         }
@@ -1052,6 +1071,26 @@ void MirrorSession::netAfterFrame()
     }
 
     netFrame++;
+    netFrameShown = netFrame;
 }
 
+}
+
+namespace MelonDSAndroid
+{
+std::string MirrorSession::netStatus()
+{
+    const char* phase = "off";
+    switch (netPhase.load())
+    {
+    case NetPhase::Off: phase = "off"; break;
+    case NetPhase::Listening: phase = "waiting"; break;
+    case NetPhase::Connecting: phase = "connecting"; break;
+    case NetPhase::AwaitState:
+    case NetPhase::AwaitReady: phase = "syncing"; break;
+    case NetPhase::Running: phase = "running"; break;
+    }
+    std::lock_guard<std::mutex> lock(netRequestMutex);
+    return std::string(phase) + " " + std::to_string(netFrameShown.load()) + " " + std::to_string(netDesyncsShown.load()) + " " + netMessage;
+}
 }

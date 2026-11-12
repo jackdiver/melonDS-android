@@ -52,6 +52,8 @@ public:
     void requestNetHost(int port, int inputDelay);
     void requestNetJoin(const std::string& address, int port, int inputDelay);
     void requestNetStop();
+    // Thread-safe summary for the UI: "<phase> <frame> <desyncs> <message>"
+    std::string netStatus();
 
     void setDebugFlags(int flags) { debugFlags = flags; }
     void setFocus(int index);
@@ -141,6 +143,9 @@ private:
     uint32_t netDesyncs = 0;
     uint32_t netHashChecks = 0;
     uint64_t netStallMs = 0;
+    std::atomic<uint32_t> netFrameShown { 0 };
+    std::atomic<uint32_t> netDesyncsShown { 0 };
+    std::string netMessage; // last end reason or error (netRequestMutex)
 
     std::vector<std::string> refHashes;   // DEBUG capture
     std::vector<uint32_t> dumpFrames;
