@@ -137,9 +137,33 @@ class LocalMultiplayerController(
         MelonDSAndroidInterface.mirrorStop()
     }
 
+    /**
+     * Always-on watcher: sessions can start from the game's own wireless menus (create group / join), so status
+     * changes are reported even when this dialog was never opened. Also keeps Wi-Fi broadcasts flowing for host
+     * discovery.
+     */
+    fun start() {
+        acquireMulticastLock()
+        startPolling()
+    }
+
     fun onDestroy() {
         polling = false
         handler.removeCallbacks(poll)
+        multicastLock?.let { if (it.isHeld) it.release() }
+        multicastLock = null
+    }
+
+    private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
+    private var permissionRequested = false
+
+    private fun acquireMulticastLock() {
+        if (multicastLock != null) return
+        val wifi = activity.applicationContext.getSystemService(android.net.wifi.WifiManager::class.java) ?: return
+        multicastLock = wifi.createMulticastLock("melonDS-netplay").apply {
+            setReferenceCounted(false)
+            try { acquire() } catch (_: SecurityException) { }
+        }
     }
 
     private fun startPolling() {
@@ -160,6 +184,10 @@ class LocalMultiplayerController(
 
     private fun describe(status: Status): String {
         return when (status.phase) {
+            "hosting" -> "Your game created a group: waiting for another device to look for groups"
+            "searching" -> "Your game is looking for groups: searching the Wi-Fi network for a host"
+            "joining" -> "Another device is joining..."
+            "idle" -> if (status.message.isNotEmpty()) status.message else "Not connected. Create or look for a group in the game, or use Host / Join below."
             "waiting" -> "Hosting: waiting for the other player to join"
             "connecting" -> "Connecting to the host..."
             "syncing" -> "Connected, starting the session..."
@@ -170,22 +198,33 @@ class LocalMultiplayerController(
     }
 
     private fun announceChanges(old: Status?, new: Status) {
+        if (new.phase == "hosting" || new.phase == "searching")
+            ensureLocalNetworkPermissionOnce()
         if (old == null) return
         if (old.phase != new.phase) {
             when (new.phase) {
+                "hosting" -> toast("Wi-Fi multiplayer: group open to other devices")
+                "joining" -> toast("A player is joining over Wi-Fi...")
                 "syncing" -> toast("Player connected, starting...")
-                "running" -> toast("Local multiplayer started")
+                "running" -> toast("Wi-Fi multiplayer connected")
                 "error" -> toast(new.message)
-                "off" -> if (old.phase != "error") toast(if (new.message.isNotEmpty()) "Local multiplayer ended: ${new.message}" else "Local multiplayer ended")
+                "off", "idle" -> if (old.phase == "running")
+                    toast(if (new.message.isNotEmpty()) "Wi-Fi multiplayer ended: ${new.message}" else "Wi-Fi multiplayer ended")
             }
         }
-        if (new.phase == "running" && new.desyncs > old.desyncs)
-            toast("The two devices are out of sync")
-        if (new.phase == "off" || new.phase == "error") {
-            // Keep polling only while the dialog is open
-            if (dialogStatusView == null)
-                polling = false
-        }
+        if (new.message.isNotEmpty() && new.message != old.message && new.phase != "running" && old.phase != "running")
+            toast(new.message)
+        if (new.phase == "running" && old.desyncs == 0L && new.desyncs > 0)
+            toast("The two devices are out of sync") // once per session
+    }
+
+    private fun ensureLocalNetworkPermissionOnce() {
+        if (permissionRequested || Build.VERSION.SDK_INT < 37)
+            return
+        if (ContextCompat.checkSelfPermission(activity, LOCAL_NETWORK_PERMISSION) == PackageManager.PERMISSION_GRANTED)
+            return
+        permissionRequested = true
+        ActivityCompat.requestPermissions(activity, arrayOf(LOCAL_NETWORK_PERMISSION), PERMISSION_REQUEST)
     }
 
     private fun ensureLocalNetworkPermission(): Boolean {

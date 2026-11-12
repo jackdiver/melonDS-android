@@ -36,9 +36,15 @@ public:
     ~DeterministicMP() override;
 
     // Called on the emulator thread at a frame boundary, before the instance's thread starts running frames.
+    // Callers use their local instance ids; internally every device must use the same "session" ids
+    // (host console = 0), because ids decide packet order. Default: identity.
+    void mapInstance(int localInst, int sessionId) { sessionOf[localInst] = sessionId; }
     void registerInstance(int inst, melonDS::NDS* nds);
     // Frame barrier bookkeeping: an instance parked at the barrier cannot advance until the next frame.
     void setAtBarrier(int inst, bool atBarrier);
+    // The console's radio was already on when the link was created (its Begin happened before the session):
+    // treat it as listening from session time 0. Call right after registerInstance.
+    void markConnected(int inst);
     // Wake and release every waiter (session teardown).
     void shutdown();
 
@@ -122,6 +128,8 @@ private:
     std::atomic<uint64_t> epochPublished { 0 }; // copy of epoch readable without the lock (spin-waiting)
     bool shuttingDown = false;
     Instance instances[kMaxInstances];
+    int sessionOf[kMaxInstances] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    int toSession(int inst) const { return (inst >= 0 && inst < kMaxInstances) ? sessionOf[inst] : inst; }
 
     // Current MP round (last CMD sent)
     int hostInst = -1;

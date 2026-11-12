@@ -10,6 +10,7 @@
 #include <vector>
 #include "types.h"
 #include "DeterminismHarness.h"
+#include "AREngine.h"
 #include "NetplayLink.h"
 
 namespace melonDS { class NDS; }
@@ -52,6 +53,13 @@ public:
     void requestNetHost(int port, int inputDelay);
     void requestNetJoin(const std::string& address, int port, int inputDelay);
     void requestNetStop();
+    // Lobby path: both devices already exchanged their own console state + firmware. Emulator thread, at a
+    // frame boundary. The session ends (and the mirror is dropped) when the connection ends: see shouldEnd().
+    bool startNetSession(std::shared_ptr<MelonInstance> primary, std::shared_ptr<MelonInstance> mirror,
+                         std::unique_ptr<NetplayLink> link, bool isHost, int inputDelay,
+                         const std::vector<uint8_t>& ownState,
+                         const std::vector<uint8_t>& remoteFirmware, const std::vector<uint8_t>& remoteState);
+    bool shouldEnd() const { return active && netAutoStop && !net; }
     // Thread-safe summary for the UI: "<phase> <frame> <desyncs> <message>"
     std::string netStatus();
     void setNetRecordDir(const std::string& dir) { netRecDir = dir; }
@@ -85,6 +93,7 @@ private:
     void netOnPacket(const uint8_t* data, size_t size);
     void netSendInputs();
     void netEnd(const char* reason);
+    void netBeginRunning();
     bool netSyncAsHost();
     bool saveStateTo(int index, std::vector<uint8_t>& out);
     bool loadStateFresh(int index, const uint8_t* data, size_t size);
@@ -150,6 +159,14 @@ private:
     std::atomic<uint32_t> netDesyncsShown { 0 };
     std::string netMessage; // last end reason or error (netRequestMutex)
     std::string netRecDir;
+    struct NetDump { uint32_t frame = 0; std::vector<uint8_t> ram[2]; };
+    std::vector<NetDump> netDumps;
+    // Session ids (host console = 0). Default 0/1; a joiner started from the lobby runs its own console as 1.
+    int sidPrimary = 0;
+    int sidMirror = 1;
+    bool netAutoStop = false;
+    std::vector<melonDS::ARCode> savedCheats;
+    MelonInstance* consoleBySession(int sid) { return sid == sidPrimary ? primary.get() : mirror.get(); }
     FILE* netRecInputs[2] = { nullptr, nullptr };
 
     std::vector<std::string> refHashes;   // DEBUG capture

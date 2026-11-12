@@ -29,4 +29,6 @@ object MelonDSAndroidInterface {
     external fun netStatus(): String
     // Debug: record every netplay session (start states + inputs) into <dir>/netrec
     external fun setNetRecordDir(directory: String)
+    // Debug: hold DS keys (bit = key index) and/or a touch for a number of frames, injected inside the emulator
+    external fun debugInput(keys: Int, touching: Boolean, x: Int, y: Int, frames: Int)
 }

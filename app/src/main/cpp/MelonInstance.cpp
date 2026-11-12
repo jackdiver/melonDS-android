@@ -30,6 +30,10 @@ namespace MelonDSAndroid
 const int kRewindBufferSize = 1024 * 1024 * 20; // Use 20MB per savestate
 const int kRewindScreenshotSize = 256 * 384 * 4;
 
+std::atomic<int> MelonInstance::debugInputFrames { 0 };
+std::atomic<u32> MelonInstance::debugInputKeys { 0 };
+std::atomic<u32> MelonInstance::debugInputTouch { 0 };
+
 MelonInstance::MelonInstance(int instanceId, std::shared_ptr<EmulatorConfiguration> configuration, std::unique_ptr<melonDS::NDSArgs> args, std::shared_ptr<Net> net, std::unique_ptr<ScreenshotRenderer> screenshotRenderer, int consoleType) :
     instanceId(instanceId),
     currentConfiguration(configuration),
@@ -566,6 +570,21 @@ void MelonInstance::applyFrameInput(bool useHarness)
         .lidClosed = static_cast<u8>(lidClosed.load() ? 1 : 0),
         .reserved = {0, 0},
     };
+
+    // Test automation (debug builds): input injected directly for a number of frames, applied on top of the
+    // frontend's input so nothing (on-screen controls, gamepads) can override it
+    if (instanceId == 0 && debugInputFrames.load() > 0)
+    {
+        input.keyMask &= ~debugInputKeys.load();
+        u32 t = debugInputTouch.load();
+        if (t & 0x80000000)
+        {
+            input.touchX = (t >> 16) & 0xFFF;
+            input.touchY = t & 0xFFF;
+            input.touching = 1;
+        }
+        debugInputFrames--;
+    }
 
     // The determinism harness may record this input or replace it with recorded input
     if (inputHook)

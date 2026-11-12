@@ -28,6 +28,7 @@
 #include "net/Net_Slirp.h"
 #include <fstream>
 #include "netplay/MirrorSession.h"
+#include "netplay/NetplayLobby.h"
 
 namespace MelonDSAndroid
 {
@@ -217,26 +218,34 @@ namespace MelonDSAndroid
     }
 
     std::atomic<bool> mirrorStartFailed { false };
+    NetplayLobby lobby;
+
+    std::shared_ptr<MelonInstance> makeMirrorInstance()
+    {
+        auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, 1);
+        if (!mirrorArgs.has_value())
+            return nullptr;
+        // DEBUG experiment switch: mirror on the interpreter
+        if (mirrorDebugFlags & 1)
+            mirrorArgs.value()->JIT = std::nullopt;
+        return std::make_shared<MelonInstance>(
+            1,
+            currentConfiguration,
+            std::move(mirrorArgs.value()),
+            net,
+            std::make_unique<ScreenshotRenderer>(nullptr),
+            currentConfiguration->consoleType
+        );
+    }
 
     void handleMirrorRequest()
     {
         int request = pendingMirrorRequest.exchange(0);
         if (request == 1 && !mirrorSession.isActive())
         {
-            auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, 1);
-            if (!mirrorArgs.has_value())
+            auto mirror = makeMirrorInstance();
+            if (!mirror)
                 return;
-            // DEBUG experiment switch: mirror on the interpreter
-            if (mirrorDebugFlags & 1)
-                mirrorArgs.value()->JIT = std::nullopt;
-            auto mirror = std::make_shared<MelonInstance>(
-                1,
-                currentConfiguration,
-                std::move(mirrorArgs.value()),
-                net,
-                std::make_unique<ScreenshotRenderer>(nullptr),
-                currentConfiguration->consoleType
-            );
             mirrorStartFailed = !mirrorSession.start(instance, mirror);
         }
         else if (request == 2)
@@ -259,14 +268,36 @@ namespace MelonDSAndroid
     {
         if (mirrorStartFailed)
             return "error 0 0 Local multiplayer needs the software video renderer (Settings > Video)";
-        return mirrorSession.netStatus();
+        if (mirrorSession.isActive())
+            return mirrorSession.netStatus();
+        return lobby.status();
     }
 
     u32 loop()
     {
         handleMirrorRequest();
+        if (mirrorSession.shouldEnd())
+            mirrorSession.stop(); // lobby-started session over: back to this device's own console only
         if (mirrorSession.isActive())
             return mirrorSession.runFrame();
+
+        // No session: let the game's own wireless menus start one (create group = host, join list = search)
+        switch (lobby.poll(*instance, instance->getCurrentRenderer() == Renderer::Software))
+        {
+        case NetplayLobby::Action::HoldFrame:
+            return 263;
+        case NetplayLobby::Action::StartSession:
+        {
+            NetplayLobby::SessionStart start = lobby.takeSessionStart();
+            auto mirror = makeMirrorInstance();
+            if (mirror && mirrorSession.startNetSession(instance, mirror, std::move(start.link), start.isHost, 2,
+                                                       start.ownState, start.remoteFirmware, start.remoteState))
+                return mirrorSession.runFrame();
+            break;
+        }
+        case NetplayLobby::Action::RunFrame:
+            break;
+        }
 
         MPInterface::Get().Process();
         return instance->runFrame();
@@ -428,6 +459,7 @@ namespace MelonDSAndroid
     void stop()
     {
         mirrorSession.stop();
+        lobby.reset();
         instance->stop();
         cleanupOpenGlContext();
     }

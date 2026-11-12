@@ -125,8 +125,8 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
     installLink();
     forceSilentMic = true;
     melonDS::JitTraceHook9 = (debugFlags & 64) ? noopHook : nullptr;
-    primary->setInputHook([this](FrameInput& input) { inputHook(0, input); });
-    mirror->setInputHook([this](FrameInput& input) { inputHook(1, input); });
+    primary->setInputHook([this](FrameInput& input) { inputHook(sidPrimary, input); });
+    mirror->setInputHook([this](FrameInput& input) { inputHook(sidMirror, input); });
 
     primary->setPresentationSource([this]() -> NDS* {
         if (focus.load() == 1)
@@ -171,6 +171,8 @@ void MirrorSession::stop()
 
     stopRecording("session stopped");
     netEnd("session stopped");
+    if (netAutoStop && primary)
+        primary->getNds()->AREngine.Cheats = savedCheats;
     forceSilentMic = false;
     primary->setInputHook(nullptr);
     primary->setPresentationSource(nullptr);
@@ -180,6 +182,9 @@ void MirrorSession::stop()
     mirror.reset();
     primary.reset();
     LOGI("mirror session stopped");
+    sidPrimary = 0;
+    sidMirror = 1;
+    netAutoStop = false;
 }
 
 void MirrorSession::workerLoop()
@@ -223,8 +228,13 @@ void MirrorSession::installLink()
     // A fresh link: its state (inboxes, connection times) is not part of savestates, so recording and replay
     // must both start from an empty link
     auto link = std::make_unique<DeterministicMP>();
+    link->mapInstance(primary->getInstanceId(), sidPrimary);
+    link->mapInstance(mirror->getInstanceId(), sidMirror);
     link->registerInstance(primary->getInstanceId(), primary->getNds());
     link->registerInstance(mirror->getInstanceId(), mirror->getNds());
+    for (MelonInstance* console : { primary.get(), mirror.get() })
+        if (console->getNds()->Wifi.IsPowerOn())
+            link->markConnected(console->getInstanceId());
     mp = link.get();
     MPInterface::SetCustom(std::move(link), MPInterface_Netplay);
 }
@@ -960,25 +970,7 @@ bool MirrorSession::netBeforeFrame()
             return true;
         }
 
-        // Session starts at frame 0 on both devices
-        netFrame = 0;
-        for (InputSlot& s : netLocal) s = InputSlot();
-        for (InputSlot& s : netRemote) s = InputSlot();
-        // The first `netDelay` frames use neutral input on both sides
-        for (uint32_t f = 0; f < (uint32_t) netDelay; f++)
-        {
-            netLocal[f % kInputRing] = InputSlot { f, kNeutralInput };
-            netRemote[f % kInputRing] = InputSlot { f, kNeutralInput };
-        }
-        netLocalLast = netDelay - 1;
-        netLocalCount = netDelay;
-        netLocalHashes.clear();
-        netRemoteHashes.clear();
-        netDesyncs = netHashChecks = 0;
-        netStallMs = 0;
-        netRecordOpenInputs();
-        netPhase = NetPhase::Running;
-        LOGI("netplay: running (%s, console %d is local)", netIsHost ? "host" : "client", netLocalIndex);
+        netBeginRunning();
     }
 
     // Running: wait until the other device's input for this frame is here
@@ -1046,9 +1038,16 @@ void MirrorSession::netAfterFrame()
 
     if (netFrame % kHashInterval == 0)
     {
-        uint64_t h0 = DeterminismHarness::hashState(primary->getNds());
-        uint64_t h1 = DeterminismHarness::hashState(mirror->getNds());
+        uint64_t h0 = DeterminismHarness::hashState(consoleBySession(0)->getNds());
+        uint64_t h1 = DeterminismHarness::hashState(consoleBySession(1)->getNds());
         netLocalHashes.push_back({ netFrame, { h0, h1 } });
+        // Evidence for desyncs: keep the last few snapshots of both consoles (written out on the first desync)
+        NetDump dump;
+        dump.frame = netFrame;
+        appendRam(consoleBySession(0)->getNds(), dump.ram[0]);
+        appendRam(consoleBySession(1)->getNds(), dump.ram[1]);
+        netDumps.push_back(std::move(dump));
+        if (netDumps.size() > 4) netDumps.erase(netDumps.begin());
         std::vector<uint8_t> msg { MsgHash };
         put(msg, netFrame);
         put(msg, h0);
@@ -1070,6 +1069,13 @@ void MirrorSession::netAfterFrame()
             netDesyncsShown = netDesyncs;
             LOGE("netplay: DESYNC at frame %u (console 0 %s, console 1 %s)", l.first,
                  l.second.first == r.second.first ? "ok" : "differs", l.second.second == r.second.second ? "ok" : "differs");
+            if (netDesyncs == 1 && !netRecDir.empty())
+            {
+                for (const NetDump& d : netDumps)
+                    if (d.frame == l.first)
+                        for (int c = 0; c < 2; c++)
+                            writeFile(netRecDir + "/netrec/desync-c" + std::to_string(c) + "-" + std::to_string(d.frame) + ".bin", d.ram[c]);
+            }
         }
         else if (netHashChecks % 10 == 0)
             LOGI("netplay: frame %u in sync (%u checks, %u desyncs, stall %llu ms)", l.first, netHashChecks, netDesyncs,
@@ -1125,5 +1131,97 @@ void MirrorSession::netRecordOpenInputs()
     if (netRecDir.empty()) return;
     for (int i = 0; i < 2; i++)
         netRecInputs[i] = fopen((netRecDir + "/netrec/inputs" + std::to_string(i) + ".bin").c_str(), "wb");
+}
+}
+
+namespace MelonDSAndroid
+{
+void MirrorSession::netBeginRunning()
+{
+    // Session starts at frame 0 on both devices
+    netFrame = 0;
+    for (InputSlot& s : netLocal) s = InputSlot();
+    for (InputSlot& s : netRemote) s = InputSlot();
+    // The first `netDelay` frames use neutral input on both sides
+    for (uint32_t f = 0; f < (uint32_t) netDelay; f++)
+    {
+        netLocal[f % kInputRing] = InputSlot { f, FrameInput { 0xFFF, 0, 0, 0, 0, {0, 0} } };
+        netRemote[f % kInputRing] = InputSlot { f, FrameInput { 0xFFF, 0, 0, 0, 0, {0, 0} } };
+    }
+    netLocalLast = netDelay - 1;
+    netLocalCount = netDelay;
+    netLocalHashes.clear();
+    netRemoteHashes.clear();
+    netDesyncs = netHashChecks = 0;
+    netStallMs = 0;
+    netFrameShown = 0;
+    netDumps.clear();
+    netDesyncsShown = 0;
+    netRecordOpenInputs();
+    netPhase = NetPhase::Running;
+    LOGI("netplay: running (%s, console %d is local)", netIsHost ? "host" : "client", netLocalIndex);
+}
+
+bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstance, std::shared_ptr<MelonInstance> mirrorInstance,
+                                    std::unique_ptr<NetplayLink> link, bool isHost, int inputDelay,
+                                    const std::vector<uint8_t>& ownState,
+                                    const std::vector<uint8_t>& remoteFirmware, const std::vector<uint8_t>& remoteState)
+{
+    // Each device keeps its own console as the primary instance; the other player's console is the mirror.
+    // Session ids are the same on both devices: host console = 0, joiner console = 1.
+    sidPrimary = isHost ? 0 : 1;
+    sidMirror = 1 - sidPrimary;
+    if (!start(std::move(primaryInstance), std::move(mirrorInstance)))
+    {
+        sidPrimary = 0;
+        sidMirror = 1;
+        return false;
+    }
+
+    {
+        // Firmware (MAC, nickname, settings) is not part of savestates: the other player's console needs theirs
+        ScopedCurrentNds guard(mirror->getNds());
+        mirror->getNds()->SetFirmware(Firmware(remoteFirmware.data(), (u32) remoteFirmware.size()));
+    }
+    if (!loadStateFresh(0, ownState.data(), ownState.size()) || !loadStateFresh(1, remoteState.data(), remoteState.size()))
+    {
+        LOGE("netplay: could not load the session states");
+        stop();
+        return false;
+    }
+    // Cheats are per device (only this device's console has them): never active during a session
+    savedCheats = primary->getNds()->AREngine.Cheats;
+    primary->getNds()->AREngine.Cheats.clear();
+    mirror->getNds()->AREngine.Cheats.clear();
+
+    // Evidence for desync investigations: the firmware each console runs with
+    if (!netRecDir.empty())
+        mkdir((netRecDir + "/netrec").c_str(), 0700);
+    if (!netRecDir.empty())
+        for (int sid = 0; sid < 2; sid++)
+        {
+            const Firmware& fw = consoleBySession(sid)->getNds()->GetFirmware();
+            writeFile(netRecDir + "/netrec/fw" + std::to_string(sid) + ".bin", std::vector<u8>(fw.Buffer(), fw.Buffer() + fw.Length()));
+        }
+
+    installLink();
+
+    if (isHost)
+        netRecordStates(ownState.data(), ownState.size(), remoteState.data(), remoteState.size());
+    else
+        netRecordStates(remoteState.data(), remoteState.size(), ownState.data(), ownState.size());
+
+    net = std::move(link);
+    netIsHost = isHost;
+    netLocalIndex = sidPrimary;
+    netDelay = inputDelay;
+    netAutoStop = true;
+    {
+        std::lock_guard<std::mutex> lock(netRequestMutex);
+        netMessage.clear();
+    }
+    setFocus(0);
+    netBeginRunning();
+    return true;
 }
 }

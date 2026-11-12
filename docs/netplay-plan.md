@@ -225,3 +225,17 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - A failed join (S23 joining an Odin-hosted group) happened once; a later attempt joined fine. Replaying the
   good session with the joiner's taps shifted by -60..+60 frames (13 variants) always joined, so tap timing is
   not the trigger. Not yet reproduced; the freeze after a cup also still needs a recorded occurrence.
+
+#### Phase 4: start from the game's own menus (2026-11-12)
+- No session: the console's wireless goes to LobbyMP, which only watches. Beacons sent = the game created a group
+  -> advertise on UDP 7065 and accept a joiner on 7064. Radio on without beacons = the game is searching ->
+  connect to an advertised host with the same game.
+- Each device sends its own console (savestate + firmware, zlib) to the other; both start a lockstep session with
+  the host console as session id 0 on both devices (DeterministicMP maps local instance ids to session ids).
+  Player 2 keeps its own save, nickname and MAC. When the connection ends, each device drops back to its own console.
+- Fixes found while testing: searching -> hosting switch; consoles whose radio was already on at session start
+  are treated as listening (otherwise the first join failed); host gives up after 15 s if the joiner's console
+  never arrives; cheats off during sessions; desync snapshots written to netrec on the first desync.
+- The two devices need different MAC addresses (the Odin was changed to ...:AF:57).
+- Test automation: `press` debug command injects DS keys/touch inside the emulator for N frames.
+- Verified on S23 + Odin: group appears in the joiner's list, first join works, sessions stay in sync.

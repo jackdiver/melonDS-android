@@ -37,6 +37,7 @@ DeterministicMP::~DeterministicMP()
 
 void DeterministicMP::registerInstance(int inst, NDS* nds)
 {
+    inst = toSession(inst);
     std::lock_guard<std::mutex> lock(mutex);
     Instance& i = instances[inst];
     i = Instance();
@@ -50,6 +51,7 @@ void DeterministicMP::registerInstance(int inst, NDS* nds)
 
 void DeterministicMP::setAtBarrier(int inst, bool atBarrier)
 {
+    inst = toSession(inst);
     std::lock_guard<std::mutex> lock(mutex);
     Instance& i = instances[inst];
     if (!i.registered)
@@ -74,6 +76,21 @@ void DeterministicMP::takeWaitStats(uint32_t count[2], double ms[2])
 {
     std::lock_guard<std::mutex> lock(mutex);
     for (int i = 0; i < 2; i++) { count[i] = statWaits[i]; ms[i] = statWaitMs[i]; statWaits[i] = 0; statWaitMs[i] = 0; }
+}
+
+void DeterministicMP::markConnected(int inst)
+{
+    inst = toSession(inst);
+    std::lock_guard<std::mutex> lock(mutex);
+    Instance& me = instances[inst];
+    if (!me.registered)
+        return;
+    me.connected = true;
+    me.everBegan = true;
+    me.beginTime = 0;
+    me.endTime = UINT64_MAX;
+    changedLocked();
+    LOGI("inst %d already listening at session start", inst);
 }
 
 void DeterministicMP::shutdown()
@@ -275,6 +292,7 @@ int DeterministicMP::deliverLocked(int inst, int index, u8* data, u64* timestamp
 
 void DeterministicMP::Begin(int inst)
 {
+    inst = toSession(inst);
     std::lock_guard<std::mutex> lock(mutex);
     Instance& me = instances[inst];
     if (!me.registered)
@@ -293,6 +311,7 @@ void DeterministicMP::Begin(int inst)
 
 void DeterministicMP::End(int inst)
 {
+    inst = toSession(inst);
     std::lock_guard<std::mutex> lock(mutex);
     Instance& me = instances[inst];
     if (!me.registered)
@@ -360,26 +379,31 @@ int DeterministicMP::sendGeneric(int inst, uint32_t type, u8* data, int len, u64
 
 int DeterministicMP::SendPacket(int inst, u8* data, int len, u64 timestamp)
 {
+    inst = toSession(inst);
     return sendGeneric(inst, 0, data, len, timestamp);
 }
 
 int DeterministicMP::SendCmd(int inst, u8* data, int len, u64 timestamp)
 {
+    inst = toSession(inst);
     return sendGeneric(inst, 1, data, len, timestamp);
 }
 
 int DeterministicMP::SendReply(int inst, u8* data, int len, u64 timestamp, u16 aid)
 {
+    inst = toSession(inst);
     return sendGeneric(inst, 2 | (aid << 16), data, len, timestamp);
 }
 
 int DeterministicMP::SendAck(int inst, u8* data, int len, u64 timestamp)
 {
+    inst = toSession(inst);
     return sendGeneric(inst, 3, data, len, timestamp);
 }
 
 int DeterministicMP::RecvPacket(int inst, u8* data, u64* timestamp)
 {
+    inst = toSession(inst);
     std::unique_lock<std::mutex> lock(mutex);
     if (!instances[inst].registered)
         return 0;
@@ -396,6 +420,7 @@ int DeterministicMP::RecvPacket(int inst, u8* data, u64* timestamp)
 
 int DeterministicMP::RecvHostPacket(int inst, u8* data, u64* timestamp)
 {
+    inst = toSession(inst);
     std::unique_lock<std::mutex> lock(mutex);
     Instance& me = instances[inst];
     if (!me.registered)
@@ -433,6 +458,7 @@ int DeterministicMP::RecvHostPacket(int inst, u8* data, u64* timestamp)
 
 u16 DeterministicMP::RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask)
 {
+    inst = toSession(inst);
     std::unique_lock<std::mutex> lock(mutex);
     if (!instances[inst].registered)
         return 0;

@@ -59,6 +59,7 @@ add_library(
         ${ANDROID-CPP}/netplay/DeterministicMP.cpp
         ${ANDROID-CPP}/netplay/MirrorSession.cpp
         ${ANDROID-CPP}/netplay/NetplayLink.cpp
+        ${ANDROID-CPP}/netplay/NetplayLobby.cpp
         ${ANDROID-CPP}/performancehint/JniPerformanceHintManager.cpp
         ${ANDROID-CPP}/performancehint/NdkPerformanceHintManager.cpp
         ${ANDROID-CPP}/performancehint/PerformanceHintManagerFactory.cpp

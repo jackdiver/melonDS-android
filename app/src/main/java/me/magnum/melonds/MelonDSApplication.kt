@@ -69,6 +69,25 @@ class MelonDSApplication : Application(), Configuration.Provider {
                     "net-host" -> MelonDSAndroidInterface.netHost(intent.getIntExtra("port", 7064), intent.getIntExtra("delay", 2))
                     "net-join" -> MelonDSAndroidInterface.netJoin(intent.getStringExtra("ip") ?: "", intent.getIntExtra("port", 7064), intent.getIntExtra("delay", 2))
                     "net-stop" -> MelonDSAndroidInterface.netStop()
+                    // Test automation: press a DS button or touch the DS bottom screen (0-255, 0-191) for `ms`
+                    "key" -> {
+                        val input = me.magnum.melonds.domain.model.Input.valueOf(intent.getStringExtra("key") ?: "A")
+                        MelonEmulator.onInputDown(input)
+                        android.os.Handler(mainLooper).postDelayed({ MelonEmulator.onInputUp(input) }, intent.getIntExtra("ms", 150).toLong())
+                    }
+                    // Frame-level injection (works regardless of controller/overlay handling): --es keys A,DOWN
+                    // and/or --ei x --ei y (touch), held for --ei frames (default 20)
+                    "press" -> {
+                        val mask = (intent.getStringExtra("keys") ?: "").split(",").filter { it.isNotBlank() }
+                            .mapNotNull { name -> me.magnum.melonds.domain.model.Input.entries.firstOrNull { it.name == name.trim() } }
+                            .fold(0) { acc, input -> acc or (1 shl input.keyCode) }
+                        val touching = intent.hasExtra("x")
+                        MelonDSAndroidInterface.debugInput(mask, touching, intent.getIntExtra("x", 0), intent.getIntExtra("y", 0), intent.getIntExtra("frames", 20))
+                    }
+                    "touch" -> {
+                        MelonEmulator.onScreenTouch(intent.getIntExtra("x", 128), intent.getIntExtra("y", 96))
+                        android.os.Handler(mainLooper).postDelayed({ MelonEmulator.onScreenRelease() }, intent.getIntExtra("ms", 150).toLong())
+                    }
                 }
             }
         }

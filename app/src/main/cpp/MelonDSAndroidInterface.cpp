@@ -1,6 +1,7 @@
-#include "JniEnvHandler.h"
+﻿#include "JniEnvHandler.h"
 #include "UriFileHandler.h"
 #include "MelonDS.h"
+#include "MelonInstance.h"
 #include "OpenGLContext.h"
 #include "netplay/DeterminismHarness.h"
 
@@ -127,6 +128,12 @@ JNIEXPORT void JNICALL
 Java_me_magnum_melonds_MelonDSAndroidInterface_setNetRecordDir(JNIEnv* env, jobject thiz, jstring directory)
 {
     MelonDSAndroid::setNetRecordDir(jstringToString(env, directory));
+}
+
+JNIEXPORT void JNICALL
+Java_me_magnum_melonds_MelonDSAndroidInterface_debugInput(JNIEnv* env, jobject thiz, jint keys, jboolean touching, jint x, jint y, jint frames)
+{
+    MelonDSAndroid::MelonInstance::setDebugInput((melonDS::u32) keys, touching, x, y, frames);
 }
 
 JNIEXPORT jstring JNICALL

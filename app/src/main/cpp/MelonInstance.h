@@ -38,6 +38,16 @@ class MelonInstance
 {
 
 public:
+    // Test automation (debug builds): keys (bit = melonDS key index) and touch held for `frames` frames on instance 0
+    static std::atomic<int> debugInputFrames;
+    static std::atomic<melonDS::u32> debugInputKeys;
+    static std::atomic<melonDS::u32> debugInputTouch; // bit 31 = touching, x << 16 | y
+    static void setDebugInput(melonDS::u32 keys, bool touching, int x, int y, int frames)
+    {
+        debugInputKeys = keys;
+        debugInputTouch = touching ? (0x80000000u | ((melonDS::u32) x << 16) | (melonDS::u32) y) : 0;
+        debugInputFrames = frames;
+    }
     MelonInstance(int instanceId, std::shared_ptr<EmulatorConfiguration> configuration, std::unique_ptr<melonDS::NDSArgs> args, std::shared_ptr<Net> net, std::unique_ptr<ScreenshotRenderer> screenshotRenderer, int consoleType);
     ~MelonInstance();
 
