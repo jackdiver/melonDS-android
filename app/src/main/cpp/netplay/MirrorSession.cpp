@@ -42,12 +42,6 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
     if (active)
         stop();
 
-    if (primaryInstance->getCurrentRenderer() != Renderer::Software)
-    {
-        LOGE("mirror session needs the software renderer (3D output must be identical on every device)");
-        return false;
-    }
-
     // Threaded 3D rendering is deterministic (replays match across phones); the mismatches once blamed on it
     // came from the divider/sqrt savestate gap. It roughly halves frame time during races.
     setThreadedRendering(primaryInstance->getNds(), true);
@@ -58,6 +52,7 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
         return false;
     }
 
+    primaryInstance->setRewindBlocked(true); // rewinding would change one console behind the other device's back
     primary = std::move(primaryInstance);
     mirror = std::move(mirrorInstance);
     setThreadedRendering(mirror->getNds(), true);
@@ -121,6 +116,7 @@ void MirrorSession::stop()
     if (netAutoStop && primary)
         primary->getNds()->AREngine.Cheats = savedCheats;
     forceSilentMic = false;
+    primary->setRewindBlocked(false);
     primary->setInputHook(nullptr);
     primary->setPresentationSource(nullptr);
     primary->clearInput();

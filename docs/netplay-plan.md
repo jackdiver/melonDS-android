@@ -264,3 +264,23 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   fallback). The `-PoptimizedNative` build switch stays: it makes debug builds ~3x faster.
 - The full tooling, with the replay/diff workflow described above, is preserved at the git tag `netplay-debug-tools`
   (in the app repo and in the core library); check it out to bring it back.
+
+#### GPU renderer experiment, control test and pause test (2026-11-13)
+- Control test done: Odin on OpenGL, `debug.melonds.allowgpu 0`, S23 hosting Mario Kart -> the Odin logged no
+  "looking for groups" line and showed no group (refuses, as designed). Switch on, restart game, join -> session
+  running, 390 checks in sync, 0 desyncs. So the Odin really rendered with OpenGL and the VRAM hash agreed with the
+  S23's software renderer. Only OpenGL was tried (not other GPU renderers).
+- Pause test done: S23 pause menu -> Local multiplayer for ~35 s -> Close. Odin waited 34.7 s for input, then both carried
+  on, 0 desyncs. The "Waiting for the other player" toast was NOT seen by the user (code exists in
+  LocalMultiplayerController.kt, "stalled" status) -> open: find out why it does not show.
+- Odin renderer restored to software, switch off. Saves verified 262144 bytes after the run; backups in
+  `C:\Users\jackd\Downloads\netplay-save-backups\2026-11-13\{odin,s23}`.
+- Decision (user): keep the GPU-renderer allowance and build the temporary switch (not built yet).
+
+#### GPU renderer made permanent (2026-11-13)
+- Removed `debug.melonds.allowgpu`; any renderer is allowed for a device's own console (hidden copy stays software; the
+  hash covers VRAM). Settings import no longer forces the renderer or rewind (still forces built-in BIOS + DS mode).
+- Rewind is blocked while a session runs (`MelonInstance::setRewindBlocked`) and restored on stop. Toast warns about
+  custom BIOS / DSi mode when hosting or searching starts.
+- Test: Odin OpenGL + S23 software, no property: 100 checks, 0 desyncs. Rewind blocking not exercised in a run yet.
+  Odin renderer put back to software afterwards. Not committed.

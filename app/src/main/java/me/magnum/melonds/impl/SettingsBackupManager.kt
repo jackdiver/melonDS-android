@@ -102,15 +102,12 @@ class SettingsBackupManager @Inject constructor(
     }
 
     /**
-     * Wi-Fi multiplayer needs every device to run the same emulation: the software video renderer (3D must be pixel
-     * identical), the built-in BIOS and firmware (both devices must use the same BIOS), DS mode, and no rewind (rewinding
-     * would change one console behind the other device's back). A restored backup must not undo these.
+     * Wi-Fi multiplayer needs every device to run the same emulation: the built-in BIOS and firmware (both devices must use the same BIOS) and DS mode (rewind and the video renderer
+     * are handled live during a session). A restored backup must not undo these.
      */
     private fun applyMultiplayerRequirements() {
         preferences.edit()
-            .putString("video_renderer", "software")
             .putBoolean("use_custom_bios", false)
-            .putBoolean("enable_rewind", false)
             .putString("console_type", "ds")
             .apply()
     }

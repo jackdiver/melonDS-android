@@ -45,7 +45,19 @@ u64 hashConsoleState(NDS* nds)
     h = hashBytes(h, &nds->ARM9.CPSR, sizeof(nds->ARM9.CPSR));
     h = hashBytes(h, nds->ARM7.R, sizeof(nds->ARM7.R));
     h = hashBytes(h, &nds->ARM7.CPSR, sizeof(nds->ARM7.CPSR));
+    // Video memory: a game that reads the rendered 3D picture back stores it here, so a renderer that draws a
+    // different picture would show up as a difference
+    h = hashBytes(h, nds->GPU.VRAM_A, 128 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_B, 128 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_C, 128 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_D, 128 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_E, 64 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_F, 16 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_G, 16 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_H, 32 * 1024);
+    h = hashBytes(h, nds->GPU.VRAM_I, 16 * 1024);
     return h;
 }
 
 }
+

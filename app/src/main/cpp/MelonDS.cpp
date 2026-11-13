@@ -254,7 +254,7 @@ namespace MelonDSAndroid
             return mirrorSession.runFrame();
 
         // No session: let the game's own wireless menus start one (create group = host, join list = search)
-        switch (lobby.poll(*instance, instance->getCurrentRenderer() == Renderer::Software))
+        switch (lobby.poll(*instance, true))
         {
         case NetplayLobby::Action::HoldFrame:
             return 263;

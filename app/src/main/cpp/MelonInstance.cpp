@@ -643,7 +643,7 @@ void MelonInstance::updateConfiguration(std::shared_ptr<EmulatorConfiguration> n
         nds->SPU.SetDegrade10Bit(static_cast<AudioBitDepth>(newConfiguration->audioSettings.audioBitrate));
     }
 
-    rewindManager.UpdateRewindSettings(newConfiguration->rewindEnabled, newConfiguration->rewindLengthSeconds, newConfiguration->rewindCaptureSpacingSeconds);
+    rewindManager.UpdateRewindSettings(newConfiguration->rewindEnabled && !rewindBlocked, newConfiguration->rewindLengthSeconds, newConfiguration->rewindCaptureSpacingSeconds);
 
     currentConfiguration = newConfiguration;
     isRenderConfigurationDirty = true;
@@ -700,8 +700,18 @@ RewindWindow MelonInstance::getRewindWindow()
     };
 }
 
+void MelonInstance::setRewindBlocked(bool blocked)
+{
+    rewindBlocked = blocked;
+    if (currentConfiguration)
+        rewindManager.UpdateRewindSettings(currentConfiguration->rewindEnabled && !blocked, currentConfiguration->rewindLengthSeconds, currentConfiguration->rewindCaptureSpacingSeconds);
+}
+
 bool MelonInstance::loadRewindState(RewindSaveState rewindSaveState)
 {
+    if (rewindBlocked)
+        return false;
+
     Savestate* savestate = new Savestate(rewindSaveState.buffer, rewindSaveState.bufferContentSize, false);
     if (savestate->Error)
     {

@@ -93,6 +93,7 @@ public:
     bool loadState(Savestate* state);
     RewindWindow getRewindWindow();
     bool loadRewindState(RewindSaveState rewindSaveState);
+    void setRewindBlocked(bool blocked);
     void setupAchievements(
         std::list<RetroAchievements::RAAchievement> achievements,
         std::list<RetroAchievements::RALeaderboard> leaderboards,
@@ -133,6 +134,7 @@ private:
     std::function<void(FrameInput&)> inputHook;
 
     std::shared_ptr<EmulatorConfiguration> currentConfiguration;
+    bool rewindBlocked = false;
     FrameQueue frameQueue;
     std::unique_ptr<ScreenshotRenderer> screenshotRenderer;
     RewindManager rewindManager;

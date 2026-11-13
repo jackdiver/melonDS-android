@@ -137,6 +137,8 @@ class LocalMultiplayerController(
     private fun announceChanges(old: Status?, new: Status) {
         if (new.phase == "hosting" || new.phase == "searching")
             ensureLocalNetworkPermissionOnce()
+        if ((new.phase == "hosting" || new.phase == "searching") && old?.phase != new.phase)
+            warnAboutIncompatibleSettings()
         if (old == null) return
         if (old.phase != new.phase) {
             when (new.phase) {
@@ -152,6 +154,15 @@ class LocalMultiplayerController(
             toast(new.message)
         if ((new.phase == "running" || new.phase == "stalled") && old.desyncs == 0L && new.desyncs > 0)
             toast("The two devices are out of sync") // once per session
+    }
+
+    // Different BIOS or DSi mode on the two devices breaks sync and cannot be switched while a game runs: tell the player.
+    private fun warnAboutIncompatibleSettings() {
+        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(activity)
+        val customBios = prefs.getBoolean("use_custom_bios", false)
+        val dsi = prefs.getString("console_type", "ds") != "ds"
+        if (customBios || dsi)
+            toast("Wi-Fi multiplayer needs the built-in BIOS and DS mode on both devices. Change this in Settings, then restart the game.")
     }
 
     private fun ensureLocalNetworkPermissionOnce() {
