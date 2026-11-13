@@ -55,7 +55,7 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
     primaryInstance->setRewindBlocked(true); // rewinding would change one console behind the other device's back
     primary = std::move(primaryInstance);
     mirror = std::move(mirrorInstance);
-    setThreadedRendering(mirror->getNds(), true);
+    mirror->useMirrorRenderer(); // draws nothing unless the game captures the screen into VRAM
 
     // GBA slot accessories (Motion Pak, rumble...) read live phone sensors: never allowed in netplay
     for (int i = 0; i < 2; i++)

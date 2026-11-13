@@ -42,6 +42,7 @@ class LocalMultiplayerController(
     private var dialogStatusView: TextView? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var permissionRequested = false
+    private var lastStalledToastMs = 0L
 
     private val poll = object : Runnable {
         override fun run() {
@@ -49,6 +50,7 @@ class LocalMultiplayerController(
             dialogStatusView?.text = describe(status)
             announceChanges(lastStatus, status)
             lastStatus = status
+            repeatStalledToast(status)
             if (polling)
                 handler.postDelayed(this, POLL_MS)
         }
@@ -145,7 +147,6 @@ class LocalMultiplayerController(
                 "hosting" -> toast("Wi-Fi multiplayer: group open to other devices")
                 "joining" -> toast("A player is joining over Wi-Fi...")
                 "running" -> if (old.phase != "stalled") toast("Wi-Fi multiplayer connected")
-                "stalled" -> toast("Waiting for the other player (their game may be paused)...")
                 else -> if (old.phase == "running" || old.phase == "stalled")
                     toast(if (new.message.isNotEmpty()) "Wi-Fi multiplayer ended: ${new.message}" else "Wi-Fi multiplayer ended")
             }
@@ -172,6 +173,15 @@ class LocalMultiplayerController(
             return
         permissionRequested = true
         ActivityCompat.requestPermissions(activity, arrayOf(LOCAL_NETWORK_PERMISSION), PERMISSION_REQUEST)
+    }
+
+    // A single toast is easy to miss (you are usually looking at the device that paused): repeat it while stalled.
+    private fun repeatStalledToast(status: Status) {
+        if (status.phase != "stalled") return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastStalledToastMs < 3500) return
+        lastStalledToastMs = now
+        toast("Waiting for the other player (their game may be paused)...")
     }
 
     private fun toast(text: String) {

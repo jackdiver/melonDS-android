@@ -5,6 +5,7 @@
 #include <EGL/eglext.h>
 #include <filesystem>
 #include <GLES3/gl3.h>
+#include <android/log.h>
 #include "Args.h"
 #include "GPU3D_Compute.h"
 #include "Configuration.h"
@@ -19,6 +20,53 @@
 #include "net/Net_Slirp.h"
 #include "Platform.h"
 #include "SDCardArgsBuilder.h"
+
+// 3D renderer for the hidden mirror console. 3D output never feeds back into emulated state, except when a game
+// captures the screen into VRAM (display capture, bit 31 of DISPCAPCNT on engine A). So it draws nothing until a
+// capture is seen, then renders in software (unthreaded) for the rest of the session. A capture that starts in a
+// frame that was not rendered is rendered on demand when its first scanline is requested.
+namespace
+{
+class MirrorRenderer3D : public melonDS::Renderer3D
+{
+public:
+    MirrorRenderer3D() : Renderer3D(false) {}
+    void Reset(melonDS::GPU& gpu) override { gpuRef = &gpu; soft.Reset(gpu); }
+    void VCount144(melonDS::GPU& gpu) override { soft.VCount144(gpu); }
+    void RestartFrame(melonDS::GPU& gpu) override { soft.RestartFrame(gpu); }
+    void RenderFrame(melonDS::GPU& gpu) override
+    {
+        gpuRef = &gpu;
+        if (captureSeen || captureActive(gpu))
+        {
+            if (!captureSeen) __android_log_print(ANDROID_LOG_INFO, "NetplayMirror", "hidden console: screen capture seen, now rendering 3D");
+            captureSeen = true;
+            soft.RenderFrame(gpu);
+            rendered = true;
+        }
+        else
+            rendered = false;
+    }
+    melonDS::u32* GetLine(int line) override
+    {
+        if (!rendered && gpuRef && captureActive(*gpuRef))
+        {
+            if (!captureSeen) __android_log_print(ANDROID_LOG_INFO, "NetplayMirror", "hidden console: screen capture seen mid-frame, rendering 3D on demand");
+            captureSeen = true;
+            soft.RenderFrame(*gpuRef);
+            rendered = true;
+        }
+        return rendered ? soft.GetLine(line) : blank;
+    }
+private:
+    static bool captureActive(melonDS::GPU& gpu) { return (gpu.GPU2D_A.CaptureCnt & (1u << 31)) != 0; }
+    melonDS::SoftRenderer soft;
+    melonDS::GPU* gpuRef = nullptr;
+    bool captureSeen = false;
+    bool rendered = false;
+    melonDS::u32 blank[256] = {};
+};
+}
 
 using namespace std;
 using namespace melonDS;
@@ -424,7 +472,7 @@ u32 MelonInstance::runFrameHeadless()
     if (isRenderConfigurationDirty)
     {
         // Mirrors always render in software: no GL context exists on their thread
-        if (currentRenderer != Renderer::Software)
+        if (!nullRenderer && currentRenderer != Renderer::Software)
         {
             nds->GPU.SetRenderer3D(std::make_unique<SoftRenderer>());
             currentRenderer = Renderer::Software;
@@ -698,6 +746,12 @@ RewindWindow MelonInstance::getRewindWindow()
         .currentFrame = frame,
         .rewindStates = rewindManager.GetRewindWindow(),
     };
+}
+
+void MelonInstance::useMirrorRenderer()
+{
+    nds->GPU.SetRenderer3D(std::make_unique<MirrorRenderer3D>());
+    nullRenderer = true;
 }
 
 void MelonInstance::setRewindBlocked(bool blocked)

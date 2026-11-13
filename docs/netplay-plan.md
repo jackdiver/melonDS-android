@@ -284,3 +284,19 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   custom BIOS / DSi mode when hosting or searching starts.
 - Test: Odin OpenGL + S23 software, no property: 100 checks, 0 desyncs. Rewind blocking not exercised in a run yet.
   Odin renderer put back to software afterwards. Not committed.
+
+#### Stalled toast and hidden-console rendering experiment (2026-11-13)
+- Toast: the status path was fine; the one-shot toast lasted 3.5 s while the user was looking at the other phone. It now
+  repeats every 3.5 s while stalled. Verified on the S23 (screenshot) while the Odin process was frozen with
+  `run-as ... kill -STOP` (a freeze of ~14 s ends the session: expected, ENet keep-alive stops).
+- Experiment (uncommitted, `adb shell setprop debug.melonds.nullmirror 1` before starting the game on both devices):
+  the hidden console uses a `NullRenderer3D` that draws nothing (`MelonInstance::useNullRenderer`).
+  Result in a real race, Odin + S23, software primary: 170 checks, 0 desyncs (hash covers VRAM).
+  CPU over 30 s: baseline Odin 44+31+34+43 = 152% of a core, S23 159%; with the experiment Odin 112%, S23 120%
+  (about 25% less total CPU; the mirror's own 3D thread disappears, the mirror thread itself barely changes).
+  Risk: anything that reads 3D output back (display capture into VRAM) would differ; Mario Kart DS did not trip it.
+- Made permanent (no property): the hidden console uses `MirrorRenderer3D` (MelonInstance.cpp). It draws no 3D until the
+  game enables display capture (DISPCAPCNT bit 31 of engine A); then it renders in software (unthreaded) for the rest
+  of the session, and a capture that begins in an unrendered frame is rendered on demand at its first scanline
+  (log: "hidden console: screen capture seen"). Mario Kart DS never triggered it. Test: Odin + S23 in a race,
+  150 checks, 0 desyncs. The capture fallback itself has not been exercised by any game yet.
