@@ -333,3 +333,17 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
 - First version allowed 1 frame as the floor: on this Wi-Fi the downward probes failed every time and the player felt
   hitching (user report). Floor is now 2, so the delay only goes up (poor networks) and back down to 2.
 - Default session on this network: stays at 2, no changes, user reports smooth play. Not tested on a poor network.
+
+#### Settings import dropped (2026-11-14)
+- The first-launch "Import your melonDS settings?" prompt (RomListActivity, SettingsBackupManager wrapper, strings) is
+  removed; those files are back to upstream. Reason: the stock melonDS 2.0.1 on the Odin has no Backup option (upstream
+  flag `settings_backup_restore_enabled` = false since commit 0a991dc5, "no versioning of the backups"), so there was never
+  a real backup to import. Only the hand-made backup had ever been tested.
+- Consequence: the multiplayer requirements (built-in BIOS, DS mode) are no longer forced by an import; the in-game toast
+  warns when a custom BIOS or DSi mode is set, and rewind is blocked live during a session.
+
+#### Settings are not forced (2026-11-14)
+- Tried forcing the built-in BIOS and DS mode at game launch (so DS games ignored a stored custom BIOS / DSi mode). Dropped
+  by decision: players must be able to keep using a custom BIOS. The warning toast stays: when hosting or searching starts
+  with a custom BIOS or DSi mode set it says both devices need the built-in BIOS and DS mode (change in Settings, restart).
+  Rewind is blocked live during a session; the renderer is free.

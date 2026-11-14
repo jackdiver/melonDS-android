@@ -94,25 +94,6 @@ class SettingsBackupManager @Inject constructor(
     }
 
     fun restore(treeUri: Uri) {
-        try {
-            restoreFromFolder(treeUri)
-        } finally {
-            applyMultiplayerRequirements()
-        }
-    }
-
-    /**
-     * Wi-Fi multiplayer needs every device to run the same emulation: the built-in BIOS and firmware (both devices must use the same BIOS) and DS mode (rewind and the video renderer
-     * are handled live during a session). A restored backup must not undo these.
-     */
-    private fun applyMultiplayerRequirements() {
-        preferences.edit()
-            .putBoolean("use_custom_bios", false)
-            .putString("console_type", "ds")
-            .apply()
-    }
-
-    private fun restoreFromFolder(treeUri: Uri) {
         val root = DocumentFile.fromTreeUri(context, treeUri) ?: return
 
         val settingsDoc = root.findFile(SETTINGS_FILE)

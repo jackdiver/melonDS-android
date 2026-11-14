@@ -1,14 +1,11 @@
 package me.magnum.melonds.ui.romlist
 
 import android.content.Intent
-import android.content.SharedPreferences
-import android.net.Uri
 import android.graphics.Color
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
@@ -29,7 +26,6 @@ import me.magnum.melonds.R
 import me.magnum.melonds.domain.model.ConsoleType
 import me.magnum.melonds.domain.model.DownloadProgress
 import me.magnum.melonds.domain.model.RomScanningStatus
-import me.magnum.melonds.impl.SettingsBackupManager
 import me.magnum.melonds.domain.model.appupdate.AppUpdate
 import me.magnum.melonds.domain.model.rom.Rom
 import me.magnum.melonds.parcelables.RomParcelable
@@ -44,7 +40,6 @@ import me.magnum.melonds.ui.romlist.ui.ProdUpdateAvailableDialog
 import me.magnum.melonds.ui.romlist.ui.RomListScreen
 import me.magnum.melonds.ui.settings.SettingsActivity
 import me.magnum.melonds.ui.theme.MelonTheme
-import javax.inject.Inject
 
 @AndroidEntryPoint
 class RomListActivity : AppCompatActivity() {
@@ -52,23 +47,10 @@ class RomListActivity : AppCompatActivity() {
     private val viewModel: RomListViewModel by viewModels()
     private val updatesViewModel: UpdatesViewModel by viewModels()
 
-    @Inject lateinit var settingsBackupManager: SettingsBackupManager
-    @Inject lateinit var preferences: SharedPreferences
-
-    // Asked once on a fresh install: import the settings backup made by the melonDS app already on this device
-    private val importSettingsLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
-        if (uri != null) {
-            val success = runCatching { settingsBackupManager.restore(uri) }.isSuccess
-            Toast.makeText(this, if (success) R.string.settings_restore_success else R.string.settings_restore_error, Toast.LENGTH_LONG).show()
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT))
         super.onCreate(savedInstanceState)
-
-        offerSettingsImportOnFirstRun()
 
         val emulatorLauncherValidatorDelegate = EmulatorLaunchValidatorDelegate(this, object : EmulatorLaunchValidatorDelegate.Callback {
             override fun onRomValidated(rom: Rom) {
@@ -220,19 +202,5 @@ class RomListActivity : AppCompatActivity() {
                 }
             }
         }
-    }
-
-    private fun offerSettingsImportOnFirstRun() {
-        // A configured install already has ROM folders; only a fresh install (no ROM folders yet) is asked, and only once
-        if (preferences.getBoolean("settings_import_prompted", false) || !preferences.getStringSet("rom_search_dirs", emptySet()).isNullOrEmpty())
-            return
-        preferences.edit().putBoolean("settings_import_prompted", true).apply()
-
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.import_settings_title)
-            .setMessage(R.string.import_settings_message)
-            .setPositiveButton(R.string.import_settings_action) { _, _ -> importSettingsLauncher.launch(null) }
-            .setNegativeButton(R.string.import_settings_skip, null)
-            .show()
     }
 }
