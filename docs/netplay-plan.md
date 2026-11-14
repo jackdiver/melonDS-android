@@ -379,3 +379,22 @@ at 60 Hz). The native hooks used for the session test (lobby over 192.168.49.x, 
   mode; settings import dropped because the stock app cannot make a backup.
 - Open: the display-capture fallback is untested by any game; only Mario Kart DS tested; the freeze after a whole cup was seen
   once; phase-locking the frame starts is the next lever for lower latency.
+
+#### More players: local benchmark on the Odin (2026-11-14)
+Question: does the game drop below 60 fps with more consoles per device? (Each device runs every player's console, so
+N players = N consoles on every device.) Temporary benchmark (patch: `docs/netplay-nplayer-bench.patch`, not committed):
+`MirrorSession::start(..., extras)` runs extra hidden consoles (clones of the primary, neutral input, not wireless-linked, no 3D/2D
+drawing) on their own threads in lockstep; `setprop debug.melonds.bench N` starts N hidden consoles while a single-player race runs.
+Run on a separate copy of the ROM (own save), real save untouched.
+- Odin 2 Portal, Mario Kart single-player race, compute + barrier time per frame (budget 16.7 ms):
+  3 consoles 7.2 ms, 4: 7.1, 5: 7.3, 6: 7.0, 7: 7.1, 8: 8.4, 9: 9.2 (averages of the steady 10 s windows; first window of each run
+  has a start-up hitch of 40-280 ms). Never above 16.7 ms in steady state, so no fps drop up to 9 consoles: the hidden consoles
+  run in parallel on the other cores, so frame time stays that of the slowest console.
+- CPU: each hidden console is ~18-21% of a core (so 8 hidden ~ 1.6 cores); the primary stays ~30% + render threads.
+- Memory is the real cost: native heap +~125 MB per hidden console (PSS 571 MB with 1 console, 991 MB with 4, 1.86 GB with 9).
+  Likely a private 32 MB copy of the ROM per console plus per-console RAM; sharing the ROM buffer is the obvious saving.
+- Not covered: the extras were not part of the wireless group (no packets), only 2 physical devices exist for a real test,
+  thermals/battery over a long session, weaker phones.
+- What N players would need: the session (MirrorSession) is hard-wired to primary + one mirror (worker, hashes, input, focus);
+  the lobby accepts one joiner; the link (DeterministicMP) already supports 16 instances but its MAC-clash aliasing is 2-way;
+  networking must carry N-1 input streams (star through the host is simplest), per-console hashes; Mario Kart DS supports up to 8.

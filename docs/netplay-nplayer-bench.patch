@@ -1,0 +1,241 @@
+diff --git a/app/src/main/cpp/MelonDS.cpp b/app/src/main/cpp/MelonDS.cpp
+index c9c194f3..e5a1d1f5 100644
+--- a/app/src/main/cpp/MelonDS.cpp
++++ b/app/src/main/cpp/MelonDS.cpp
+@@ -18,6 +18,8 @@
+ #include "Savestate.h"
+ #include "MelonInstance.h"
+ #include "RewindManager.h"
++#include <sys/system_properties.h>
++#include <cstdlib>
+ #include "ROMManager.h"
+ #include "MPInterface.h"
+ #include "AndroidCameraHandler.h"
+@@ -217,13 +219,13 @@ namespace MelonDSAndroid
+ 
+     NetplayLobby lobby;
+ 
+-    std::shared_ptr<MelonInstance> makeMirrorInstance()
++    std::shared_ptr<MelonInstance> makeMirrorInstance(int id = 1)
+     {
+-        auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, 1);
++        auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, id);
+         if (!mirrorArgs.has_value())
+             return nullptr;
+         return std::make_shared<MelonInstance>(
+-            1,
++            id,
+             currentConfiguration,
+             std::move(mirrorArgs.value()),
+             net,
+@@ -246,8 +248,37 @@ namespace MelonDSAndroid
+             mirrorSession.servicePaused();
+     }
+ 
++    // TEMP benchmark: `setprop debug.melonds.bench N` while a single-player game runs starts N hidden consoles next to this one
++    // (not wireless-linked, neutral input) to measure how frame time scales; 0 stops them.
++    bool benchRunning = false;
++    int benchPollCounter = 0;
++    void pollBenchmark()
++    {
++        if (++benchPollCounter < 120)
++            return;
++        benchPollCounter = 0;
++        char value[PROP_VALUE_MAX] = {};
++        int n = __system_property_get("debug.melonds.bench", value) > 0 ? atoi(value) : 0;
++        if (n > 8) n = 8;
++        if (benchRunning && (n == 0 || !mirrorSession.isActive()))
++        {
++            if (mirrorSession.isActive()) mirrorSession.stop();
++            benchRunning = false;
++        }
++        if (!benchRunning && n > 0 && !mirrorSession.isActive() && !instance->getNds()->Wifi.IsPowerOn())
++        {
++            auto mirror = makeMirrorInstance(1);
++            std::vector<std::shared_ptr<MelonInstance>> extras;
++            for (int i = 2; i <= n; i++)
++                if (auto e = makeMirrorInstance(i)) extras.push_back(e);
++            if (mirror && mirrorSession.start(instance, mirror, extras))
++                benchRunning = true;
++        }
++    }
++
+     u32 loop()
+     {
++        pollBenchmark();
+         if (mirrorSession.shouldEnd())
+             mirrorSession.stop(); // lobby-started session over: back to this device's own console only
+         if (mirrorSession.isActive())
+diff --git a/app/src/main/cpp/netplay/MirrorSession.cpp b/app/src/main/cpp/netplay/MirrorSession.cpp
+index 0a361d4b..0caaf431 100644
+--- a/app/src/main/cpp/netplay/MirrorSession.cpp
++++ b/app/src/main/cpp/netplay/MirrorSession.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <android/log.h>
+ #include <pthread.h>
++#include <chrono>
+ #include "DeterministicMP.h"
+ #include "NetplayLink.h"
+ #include "NDSCart.h"
+@@ -37,7 +38,8 @@ void MirrorSession::setThreadedRendering(NDS* nds, bool threaded)
+     static_cast<SoftRenderer&>(nds->GPU.GetRenderer3D()).SetThreaded(threaded, nds->GPU);
+ }
+ 
+-bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::shared_ptr<MelonInstance> mirrorInstance)
++bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::shared_ptr<MelonInstance> mirrorInstance,
++                          std::vector<std::shared_ptr<MelonInstance>> extraMirrors)
+ {
+     if (active)
+         stop();
+@@ -52,6 +54,17 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
+         return false;
+     }
+ 
++    for (auto& e : extraMirrors)
++    {
++        if (!e->cloneFrom(*primaryInstance))
++        {
++            LOGE("failed to clone the primary console into an extra mirror");
++            return false;
++        }
++        e->useMirrorRenderer();
++    }
++    extras = std::move(extraMirrors);
++    workerCount = 1 + (int) extras.size();
+     primaryInstance->setRewindBlocked(true); // rewinding would change one console behind the other device's back
+     primary = std::move(primaryInstance);
+     mirror = std::move(mirrorInstance);
+@@ -87,8 +100,15 @@ bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::s
+         framesRequested = 0;
+         framesDone = 0;
+     }
+-    worker = std::thread(&MirrorSession::workerLoop, this);
++    worker = std::thread(&MirrorSession::workerLoop, this, mirror.get(), true);
+     pthread_setname_np(worker.native_handle(), "MirrorEmuThread");
++    for (auto& e : extras)
++    {
++        extraWorkers.emplace_back(&MirrorSession::workerLoop, this, e.get(), false);
++        pthread_setname_np(extraWorkers.back().native_handle(), "MirrorExtra");
++    }
++    benchFrames = benchOver = 0;
++    benchSumMs = benchMaxMs = 0;
+ 
+     focus = 0;
+     active = true;
+@@ -111,6 +131,12 @@ void MirrorSession::stop()
+     cv.notify_all();
+     if (worker.joinable())
+         worker.join();
++    for (auto& t : extraWorkers)
++        if (t.joinable())
++            t.join();
++    extraWorkers.clear();
++    extras.clear();
++    workerCount = 1;
+ 
+     netEnd("session stopped");
+     if (netAutoStop && primary)
+@@ -130,21 +156,23 @@ void MirrorSession::stop()
+     netAutoStop = false;
+ }
+ 
+-void MirrorSession::workerLoop()
++void MirrorSession::workerLoop(MelonInstance* console, bool linked)
+ {
+-    int mirrorId = mirror->getInstanceId();
++    int mirrorId = console->getInstanceId();
++    uint64_t done = 0;
+     for (;;)
+     {
+         {
+             std::unique_lock<std::mutex> lock(mutex);
+-            cv.wait(lock, [&] { return quit || framesRequested > framesDone; });
++            cv.wait(lock, [&] { return quit || framesRequested > done; });
+             if (quit)
+                 return;
+         }
+ 
+-        mp->setAtBarrier(mirrorId, false);
+-        mirror->runFrameHeadless();
+-        mp->setAtBarrier(mirrorId, true);
++        if (linked) mp->setAtBarrier(mirrorId, false);
++        console->runFrameHeadless();
++        if (linked) mp->setAtBarrier(mirrorId, true);
++        done++;
+ 
+         {
+             std::lock_guard<std::mutex> lock(mutex);
+@@ -162,7 +190,7 @@ void MirrorSession::waitForMirror()
+     // Park the primary at the frame barrier so the mirror can finish (and so deadlocks resolve)
+     mp->setAtBarrier(primary->getInstanceId(), true);
+     std::unique_lock<std::mutex> lock(mutex);
+-    cv.wait(lock, [&] { return quit || framesDone >= framesRequested; });
++    cv.wait(lock, [&] { return quit || framesDone >= framesRequested * (uint64_t) workerCount; });
+     waitedThisFrame = true;
+ }
+ 
+@@ -191,6 +219,7 @@ void MirrorSession::inputHook(int sid, FrameInput& input)
+ 
+ u32 MirrorSession::runFrame()
+ {
++    const auto benchStart = std::chrono::steady_clock::now();
+     handleNetRequest();
+     if (net)
+         netBeforeFrame();
+@@ -212,6 +241,20 @@ u32 MirrorSession::runFrame()
+ 
+     u32 lines = primary->runFrame();
+     waitForMirror();
++    if (workerCount > 1)
++    {
++        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - benchStart).count();
++        benchSumMs += ms;
++        if (ms > benchMaxMs) benchMaxMs = ms;
++        if (ms > 16.7) benchOver++;
++        if (++benchFrames == 600)
++        {
++            LOGI("bench: %d consoles, compute+barrier per frame avg %.1f ms, max %.1f ms, %llu of 600 frames over 16.7 ms",
++                 workerCount + 1, benchSumMs / 600.0, benchMaxMs, (unsigned long long) benchOver);
++            benchFrames = benchOver = 0;
++            benchSumMs = benchMaxMs = 0;
++        }
++    }
+ 
+     if (netPhase.load() == NetPhase::Running)
+         netAfterFrame();
+diff --git a/app/src/main/cpp/netplay/MirrorSession.h b/app/src/main/cpp/netplay/MirrorSession.h
+index 241d9291..4eb1b6cc 100644
+--- a/app/src/main/cpp/netplay/MirrorSession.h
++++ b/app/src/main/cpp/netplay/MirrorSession.h
+@@ -33,7 +33,8 @@ public:
+     ~MirrorSession();
+ 
+     // Emulator thread, at a frame boundary. The primary must use the software renderer.
+-    bool start(std::shared_ptr<MelonInstance> primary, std::shared_ptr<MelonInstance> mirror);
++    bool start(std::shared_ptr<MelonInstance> primary, std::shared_ptr<MelonInstance> mirror,
++               std::vector<std::shared_ptr<MelonInstance>> extraMirrors = {}); // extras: benchmark only
+     void stop();
+     bool isActive() const { return active; }
+ 
+@@ -64,7 +65,7 @@ private:
+     static void setThreadedRendering(melonDS::NDS* nds, bool threaded);
+     void installLink();
+     void inputHook(int index, FrameInput& input);
+-    void workerLoop();
++    void workerLoop(MelonInstance* console, bool linked);
+     void waitForMirror();
+ 
+     // Netplay
+@@ -90,6 +91,11 @@ private:
+     std::atomic<int> focus { 0 };
+ 
+     std::thread worker;
++    std::vector<std::shared_ptr<MelonInstance>> extras; // benchmark: more hidden consoles, not linked to the wireless
++    std::vector<std::thread> extraWorkers;
++    int workerCount = 1;
++    uint64_t benchFrames = 0, benchOver = 0;
++    double benchSumMs = 0, benchMaxMs = 0;
+     std::mutex mutex;
+     std::condition_variable cv;
+     uint64_t framesRequested = 0;
