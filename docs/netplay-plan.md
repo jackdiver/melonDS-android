@@ -314,3 +314,10 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   both runs. Flag 2 changed total CPU not at all; stall numbers were better in that run but it was a different run, so
   inconclusive. Not committed; flags still behind the property.
 - Made permanent (2D skip, `MirrorRenderer2D`); the priority flag and the property were removed.
+
+#### 1-frame input delay trial (2026-11-14)
+- Trial via a temporary property (`debug.melonds.inputdelay`, removed again), Odin + S23 on home Wi-Fi with the
+  low-latency lock, in a race: stays in sync (90 checks, 0 desyncs) but remote input was late in ~20-65% of frames
+  (worst wait 55 ms), about 1 s of stall per 10 s. With a 2-frame delay it was late in 0-7% of frames.
+  Conclusion: 1 frame does not work on this network (one-way ~13 ms is close to a frame, plus jitter); keep 2.
+  Next ideas if wanted: Wi-Fi Direct / hotspot and re-test, or adaptive 1-3 frames chosen from measured lateness.
