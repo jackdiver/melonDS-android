@@ -26,16 +26,18 @@ namespace MelonDSAndroid
 
 namespace
 {
-constexpr uint16_t kSessionPort = 7064;
+constexpr uint16_t kSlotPortBase = 7080;   // one listening port per joiner slot (host)
+constexpr uint16_t kMeshPortBase = 7200;   // joiner-to-joiner links: base + a * 8 + b
+constexpr uint64_t kAutoStartMs = 8000;    // the host starts this long after the last joiner arrived
 constexpr uint16_t kDiscoveryPort = 7065;
 constexpr uint64_t kBeaconTimeoutMs = 1500;   // no beacon for this long: the game closed its group
 constexpr uint64_t kScanDelayMs = 1000;       // wireless on without beacons for this long: the game is searching
 constexpr uint64_t kAdvertIntervalMs = 500;
 constexpr uint64_t kConnectTimeoutMs = 5000;
-constexpr uint64_t kExchangeTimeoutMs = 15000;
+constexpr uint64_t kExchangeTimeoutMs = 30000;
 const char kMagic[4] = { 'M', 'D', 'N', 'P' };
 
-enum LobbyMsg : uint8_t { MsgHello = 'H', MsgState = 'S', MsgReject = 'R' };
+enum LobbyMsg : uint8_t { MsgHello = 'H', MsgState = 'S', MsgReject = 'R', MsgWelcome = 'W', MsgStart = 'G' };
 
 uint64_t nowMs()
 {
@@ -175,6 +177,7 @@ std::string NetplayLobby::status()
     case Phase::Idle: name = "idle"; break;
     case Phase::Hosting: name = "hosting"; break;
     case Phase::Searching: name = "searching"; break;
+    case Phase::Joined:
     case Phase::Exchanging: name = "joining"; break;
     }
     std::lock_guard<std::mutex> lock(messageMutex);
@@ -183,18 +186,22 @@ std::string NetplayLobby::status()
 
 void NetplayLobby::reset()
 {
-    if (link)
-    {
-        link->close();
-        link.reset();
-    }
+    joiners.clear();
+    listener.reset();
+    rejected.reset();
+    hostLink.reset();
+    links.clear();
     closeUdp();
-    helloReceived = false;
-    stateSent = false;
-    receivedPacket.clear();
+    welcomed = false;
+    stateSent.clear();
+    stateGot.clear();
+    peerFirmware.clear();
+    peerState.clear();
     ownState.clear();
     ownFirmware.clear();
     rejectUntilMs = 0;
+    lastJoinMs = 0;
+    startRequested = false;
     setPhase(Phase::Idle);
 }
 
@@ -231,53 +238,6 @@ void NetplayLobby::closeUdp()
     udpSocket = -1;
 }
 
-void NetplayLobby::advertise(uint32_t gameCode)
-{
-    uint64_t now = nowMs();
-    if (udpSocket < 0 || now - lastAdvertMs < kAdvertIntervalMs)
-        return;
-    lastAdvertMs = now;
-
-    std::vector<uint8_t> msg(kMagic, kMagic + 4);
-    msg.push_back(1); // version
-    put(msg, gameCode);
-    put(msg, kSessionPort);
-
-    sockaddr_in addr {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(kDiscoveryPort);
-    addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    sendto(udpSocket, msg.data(), msg.size(), 0, (sockaddr*) &addr, sizeof(addr));
-}
-
-bool NetplayLobby::findHost(uint32_t gameCode, std::string& address)
-{
-    if (udpSocket < 0)
-        return false;
-    bool found = false;
-    uint8_t buffer[64];
-    for (;;)
-    {
-        sockaddr_in from {};
-        socklen_t fromLen = sizeof(from);
-        ssize_t n = recvfrom(udpSocket, buffer, sizeof(buffer), 0, (sockaddr*) &from, &fromLen);
-        if (n <= 0)
-            break;
-        const uint8_t* p = buffer + 5;
-        const uint8_t* end = buffer + n;
-        uint32_t code; uint16_t port;
-        if (n < 5 || memcmp(buffer, kMagic, 4) != 0 || buffer[4] != 1 || !get(p, end, code) || !get(p, end, port))
-            continue;
-        if (code != gameCode)
-            continue;
-        char text[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &from.sin_addr, text, sizeof(text));
-        address = text;
-        found = true;
-    }
-    return found;
-}
-
 bool NetplayLobby::snapshot(NDS* nds, std::vector<uint8_t>& state, std::vector<uint8_t>& firmware)
 {
     ScopedCurrentNds guard(nds);
@@ -289,21 +249,6 @@ bool NetplayLobby::snapshot(NDS* nds, std::vector<uint8_t>& state, std::vector<u
     const Firmware& fw = nds->GetFirmware();
     firmware.assign(fw.Buffer(), fw.Buffer() + fw.Length());
     return true;
-}
-
-void NetplayLobby::sendHello(NDS* nds)
-{
-    GameId id = gameIdOf(nds);
-    std::vector<uint8_t> msg { MsgHello };
-    put(msg, id.gameCode);
-    put(msg, id.headerCrc);
-    put(msg, id.romLength);
-    put(msg, fnv(nds->GetARM9BIOS().data(), nds->GetARM9BIOS().size()));
-    put(msg, fnv(nds->GetARM7BIOS().data(), nds->GetARM7BIOS().size()));
-    const auto& mac = nds->GetFirmware().GetHeader().MacAddr;
-    msg.insert(msg.end(), mac.begin(), mac.end());
-    link->send(msg.data(), msg.size(), true);
-    link->flush();
 }
 
 bool NetplayLobby::checkHello(NDS* nds, const uint8_t* data, size_t size, std::string& error)
@@ -336,27 +281,6 @@ bool NetplayLobby::checkHello(NDS* nds, const uint8_t* data, size_t size, std::s
     return true;
 }
 
-void NetplayLobby::sendState(const std::vector<uint8_t>& state, const std::vector<uint8_t>& firmware)
-{
-    std::vector<uint8_t> raw;
-    put(raw, (uint32_t) firmware.size());
-    raw.insert(raw.end(), firmware.begin(), firmware.end());
-    put(raw, (uint32_t) state.size());
-    raw.insert(raw.end(), state.begin(), state.end());
-
-    uLongf packed = compressBound(raw.size());
-    std::vector<uint8_t> msg(5 + packed);
-    msg[0] = MsgState;
-    uint32_t rawSize = (uint32_t) raw.size();
-    memcpy(&msg[1], &rawSize, 4);
-    if (compress2(&msg[5], &packed, raw.data(), raw.size(), 1) != Z_OK)
-        return;
-    msg.resize(5 + packed);
-    link->send(msg.data(), msg.size(), true);
-    link->flush();
-    LOGI("sent own console (%zu bytes firmware, %zu bytes state, %zu compressed)", firmware.size(), state.size(), msg.size());
-}
-
 bool NetplayLobby::readState(const uint8_t* data, size_t size, std::vector<uint8_t>& state, std::vector<uint8_t>& firmware)
 {
     if (size < 5) return false;
@@ -377,13 +301,242 @@ bool NetplayLobby::readState(const uint8_t* data, size_t size, std::vector<uint8
     return true;
 }
 
-// Hello, state and reject packets (letters) matter to the lobby; the other device may already be sending session
-// input packets (numbers), and a batch can hold several packets: never let an input packet displace a control one.
-static void keepPacket(std::vector<uint8_t>& kept, const uint8_t* data, size_t size)
+
+// Collects every packet that arrived on a link (in order)
+static NetplayLink::Event pollLink(NetplayLink& link, int timeoutMs, std::vector<std::vector<uint8_t>>& messages)
 {
-    auto isControl = [](const uint8_t* d, size_t s) { return s > 0 && (d[0] == 'H' || d[0] == 'S' || d[0] == 'R'); };
-    if (kept.empty() || (isControl(data, size) && !isControl(kept.data(), kept.size())))
-        kept.assign(data, data + size);
+    messages.clear();
+    return link.service(timeoutMs, [&](const uint8_t* d, size_t s) { messages.emplace_back(d, d + s); });
+}
+
+static uint16_t meshPort(int a, int b)
+{
+    return (uint16_t) (kMeshPortBase + a * 8 + b);
+}
+
+void NetplayLobby::advertise(uint32_t gameCode)
+{
+    uint64_t now = nowMs();
+    if (udpSocket < 0 || !listener || now - lastAdvertMs < kAdvertIntervalMs)
+        return;
+    lastAdvertMs = now;
+
+    std::vector<uint8_t> msg(kMagic, kMagic + 4);
+    msg.push_back(2); // version
+    put(msg, gameCode);
+    put(msg, (uint16_t) (kSlotPortBase + listenerSlot));
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(kDiscoveryPort);
+    addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    sendto(udpSocket, msg.data(), msg.size(), 0, (sockaddr*) &addr, sizeof(addr));
+}
+
+bool NetplayLobby::findHost(uint32_t gameCode, std::string& address, uint16_t& port)
+{
+    if (udpSocket < 0)
+        return false;
+    bool found = false;
+    uint8_t buffer[64];
+    for (;;)
+    {
+        sockaddr_in from {};
+        socklen_t fromLen = sizeof(from);
+        ssize_t n = recvfrom(udpSocket, buffer, sizeof(buffer), 0, (sockaddr*) &from, &fromLen);
+        if (n <= 0)
+            break;
+        const uint8_t* p = buffer + 5;
+        const uint8_t* end = buffer + n;
+        uint32_t code; uint16_t advertisedPort;
+        if (n < 5 || memcmp(buffer, kMagic, 4) != 0 || buffer[4] != 2 || !get(p, end, code) || !get(p, end, advertisedPort))
+            continue;
+        if (code != gameCode)
+            continue;
+        char text[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &from.sin_addr, text, sizeof(text));
+        address = text;
+        port = advertisedPort;
+        found = true;
+    }
+    return found;
+}
+
+void NetplayLobby::sendHello(NDS* nds)
+{
+    GameId id = gameIdOf(nds);
+    std::vector<uint8_t> msg { MsgHello };
+    put(msg, id.gameCode);
+    put(msg, id.headerCrc);
+    put(msg, id.romLength);
+    put(msg, fnv(nds->GetARM9BIOS().data(), nds->GetARM9BIOS().size()));
+    put(msg, fnv(nds->GetARM7BIOS().data(), nds->GetARM7BIOS().size()));
+    const auto& mac = nds->GetFirmware().GetHeader().MacAddr;
+    msg.insert(msg.end(), mac.begin(), mac.end());
+    hostLink->send(msg.data(), msg.size(), true);
+    hostLink->flush();
+}
+
+void NetplayLobby::sendState(NetplayLink& to, const std::vector<uint8_t>& state, const std::vector<uint8_t>& firmware)
+{
+    std::vector<uint8_t> raw;
+    put(raw, (uint32_t) firmware.size());
+    raw.insert(raw.end(), firmware.begin(), firmware.end());
+    put(raw, (uint32_t) state.size());
+    raw.insert(raw.end(), state.begin(), state.end());
+
+    uLongf packed = compressBound(raw.size());
+    std::vector<uint8_t> msg(5 + packed);
+    msg[0] = MsgState;
+    uint32_t rawSize = (uint32_t) raw.size();
+    memcpy(&msg[1], &rawSize, 4);
+    if (compress2(&msg[5], &packed, raw.data(), raw.size(), 1) != Z_OK)
+        return;
+    msg.resize(5 + packed);
+    to.send(msg.data(), msg.size(), true);
+    to.flush();
+    LOGI("sent own console (%zu bytes firmware, %zu bytes state, %zu compressed)", firmware.size(), state.size(), msg.size());
+}
+
+bool NetplayLobby::openListener()
+{
+    bool used[8] = {};
+    for (const Joiner& j : joiners)
+        used[j.slot] = true;
+    if ((int) joiners.size() + 1 >= maxPlayers)
+        return false; // full
+    int slot = -1;
+    for (int s = 0; s < 7; s++)
+        if (!used[s]) { slot = s; break; }
+    if (slot < 0)
+        return false;
+    listener = std::make_unique<NetplayLink>();
+    if (!listener->host(kSlotPortBase + slot))
+    {
+        listener.reset();
+        return false;
+    }
+    listenerSlot = slot;
+    return true;
+}
+
+void NetplayLobby::beginExchange(int self, int count)
+{
+    selfSid = self;
+    playerCount = count;
+    links.clear();
+    links.resize(count);
+    stateSent.assign(count, 0);
+    stateGot.assign(count, 0);
+    stateSent[self] = stateGot[self] = 1;
+    peerFirmware.assign(count, {});
+    peerState.assign(count, {});
+}
+
+NetplayLobby::Action NetplayLobby::startAsHost(NDS* nds, uint64_t now)
+{
+    int count = (int) joiners.size() + 1;
+    std::vector<std::string> ips;
+    for (Joiner& j : joiners)
+        ips.push_back(j.link->peerAddress());
+    for (const std::string& ip : ips)
+    {
+        in_addr a {};
+        if (inet_pton(AF_INET, ip.c_str(), &a) != 1)
+        {
+            setMessage("could not read a player's network address");
+            reset();
+            return Action::RunFrame;
+        }
+    }
+    if (!snapshot(nds, ownState, ownFirmware))
+    {
+        reset();
+        return Action::RunFrame;
+    }
+    for (size_t k = 0; k < joiners.size(); k++)
+    {
+        std::vector<uint8_t> msg { MsgStart, (uint8_t) count, (uint8_t) (k + 1) };
+        for (const std::string& ip : ips)
+        {
+            in_addr a {};
+            inet_pton(AF_INET, ip.c_str(), &a);
+            put(msg, a.s_addr);
+        }
+        joiners[k].link->send(msg.data(), msg.size(), true);
+        joiners[k].link->flush();
+    }
+    listener.reset();
+    rejected.reset();
+    closeUdp();
+    std::vector<Joiner> mine = std::move(joiners);
+    joiners.clear();
+    beginExchange(0, count);
+    for (size_t k = 0; k < mine.size(); k++)
+        links[k + 1] = std::move(mine[k].link);
+    setPhase(Phase::Exchanging);
+    exchangeStartMs = now;
+    LOGI("starting with %d players (host)", count);
+    return Action::HoldFrame;
+}
+
+// All roles: every device holds its console still, links up with every other device and trades console states
+NetplayLobby::Action NetplayLobby::exchange(uint64_t now)
+{
+    auto abort = [&](const char* text) {
+        setMessage(text);
+        LOGE("lobby: %s", text);
+        reset();
+        return Action::RunFrame;
+    };
+    if (now - exchangeStartMs > kExchangeTimeoutMs)
+        return abort("the other devices did not send their consoles in time");
+
+    bool allDone = true;
+    bool waited = false;
+    std::vector<std::vector<uint8_t>> messages;
+    for (int sid = 0; sid < playerCount; sid++)
+    {
+        if (sid == selfSid)
+            continue;
+        NetplayLink* link = links[sid].get();
+        if (!link)
+            return abort("a player link is missing");
+        NetplayLink::Event ev = pollLink(*link, waited || stateGot[sid] ? 0 : 2, messages);
+        if (!stateGot[sid])
+            waited = true;
+        for (auto& m : messages)
+        {
+            if (!m.empty() && m[0] == MsgState && !stateGot[sid])
+            {
+                if (!readState(m.data(), m.size(), peerState[sid], peerFirmware[sid]))
+                    return abort("could not read another player's console");
+                stateGot[sid] = 1;
+            }
+        }
+        if (ev == NetplayLink::Event::Disconnected && !stateGot[sid])
+            return abort("another player disconnected");
+        if (link->isConnected() && !stateSent[sid])
+        {
+            sendState(*link, ownState, ownFirmware);
+            stateSent[sid] = 1;
+        }
+        if (!stateGot[sid] || !stateSent[sid])
+            allDone = false;
+    }
+    if (!allDone)
+        return Action::HoldFrame;
+
+    pending = SessionStart();
+    pending.selfSid = selfSid;
+    pending.count = playerCount;
+    pending.links = std::move(links);
+    pending.ownState = std::move(ownState);
+    pending.firmware = std::move(peerFirmware);
+    pending.states = std::move(peerState);
+    links.clear();
+    reset();
+    return Action::StartSession;
 }
 
 NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRenderer)
@@ -395,11 +548,7 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
     bool beaconing = lastBeacon != 0 && now - lastBeacon < kBeaconTimeoutMs;
     bool searching = mp->wirelessOn.load() && !beaconing && now - mp->beginMs.load() > kScanDelayMs;
     uint32_t gameCode = gameIdOf(nds).gameCode;
-
-    auto receive = [this](std::vector<uint8_t>& out) {
-        out.clear();
-        return link->service(0, [&](const uint8_t* d, size_t s) { keepPacket(out, d, s); });
-    };
+    std::vector<std::vector<uint8_t>> messages;
 
     switch (phase)
     {
@@ -411,8 +560,8 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
                 setMessage("local multiplayer needs the software video renderer (Settings > Video)");
                 return Action::RunFrame;
             }
-            link = std::make_unique<NetplayLink>();
-            if (!link->host(kSessionPort) || !openUdp(false))
+            joiners.clear();
+            if (!openListener() || !openUdp(false))
             {
                 setMessage("could not open the network ports");
                 reset();
@@ -420,6 +569,8 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
             }
             isHost = true;
             setMessage("");
+            startRequested = false;
+            lastJoinMs = 0;
             setPhase(Phase::Hosting);
             LOGI("game created a group: hosting");
         }
@@ -428,6 +579,7 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
             if (!openUdp(true))
                 return Action::RunFrame;
             isHost = false;
+            welcomed = false;
             setMessage("");
             setPhase(Phase::Searching);
             LOGI("game is looking for groups: searching for a host");
@@ -443,55 +595,77 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
             return Action::RunFrame;
         }
         advertise(gameCode);
-        if (rejectUntilMs != 0)
+
+        // Joiners that are already in: drop the ones that left
+        for (size_t i = 0; i < joiners.size();)
         {
-            link->service(0, [](const uint8_t*, size_t) {});
-            if (now >= rejectUntilMs)
+            NetplayLink::Event ev = pollLink(*joiners[i].link, 0, messages);
+            if (ev == NetplayLink::Event::Disconnected || !joiners[i].link->isConnected())
             {
-                rejectUntilMs = 0;
-                reset();
+                LOGI("a joiner left before the start");
+                joiners.erase(joiners.begin() + i);
+                setMessage(joiners.empty() ? "" : std::to_string(joiners.size() + 1) + " players");
+                if (!listener && !rejected)
+                    openListener();
+                continue;
             }
-            return Action::RunFrame;
+            i++;
         }
-        NetplayLink::Event ev = receive(receivedPacket);
-        if (ev == NetplayLink::Event::Disconnected)
+
+        if (rejected && now >= rejectUntilMs)
+            rejected.reset();
+        else if (rejected)
+            pollLink(*rejected, 0, messages);
+        if (!listener && !rejected)
+            openListener();
+
+        if (listener)
         {
-            // Back to waiting for another joiner
-            reset();
-            return Action::RunFrame;
-        }
-        if (!receivedPacket.empty() && receivedPacket[0] == MsgHello)
-        {
-            std::string error;
-            if (!checkHello(nds, receivedPacket.data(), receivedPacket.size(), error))
+            NetplayLink::Event ev = pollLink(*listener, 0, messages);
+            if (!messages.empty() && !messages[0].empty() && messages[0][0] == MsgHello)
             {
-                setMessage(error);
-                std::vector<uint8_t> msg { MsgReject };
-                msg.insert(msg.end(), error.begin(), error.end());
-                link->send(msg.data(), msg.size(), true);
-                link->flush();
-                // Keep the connection open briefly so the rejection actually reaches the joiner
-                rejectUntilMs = now + 1000;
-                return Action::RunFrame;
+                std::string error;
+                if (!checkHello(nds, messages[0].data(), messages[0].size(), error))
+                {
+                    setMessage(error);
+                    std::vector<uint8_t> msg { MsgReject };
+                    msg.insert(msg.end(), error.begin(), error.end());
+                    listener->send(msg.data(), msg.size(), true);
+                    listener->flush();
+                    // Keep the connection open briefly so the rejection actually reaches the joiner
+                    rejected = std::move(listener);
+                    rejectUntilMs = now + 1000;
+                }
+                else
+                {
+                    uint8_t welcome = MsgWelcome;
+                    listener->send(&welcome, 1, true);
+                    listener->flush();
+                    Joiner joiner;
+                    joiner.link = std::move(listener);
+                    joiner.slot = listenerSlot;
+                    joiners.push_back(std::move(joiner));
+                    lastJoinMs = now;
+                    setMessage(std::to_string(joiners.size() + 1) + " players");
+                    LOGI("a player joined the lobby (%zu joiners)", joiners.size());
+                }
             }
-            if (!snapshot(nds, ownState, ownFirmware))
+            else if (ev == NetplayLink::Event::Disconnected)
             {
-                reset();
-                return Action::RunFrame;
+                listener.reset();
             }
-            sendState(ownState, ownFirmware);
-            setPhase(Phase::Exchanging);
-            exchangeStartMs = now;
-            // Hold this console still until the joiner's state arrives: the session starts from the state just sent
-            return Action::HoldFrame;
         }
+
+        bool requested = startRequested.exchange(false);
+        if (!joiners.empty() && (requested || now - lastJoinMs >= kAutoStartMs || (int) joiners.size() + 1 >= maxPlayers))
+            return startAsHost(nds, now);
         return Action::RunFrame;
     }
 
     case Phase::Searching:
     {
         // The game left the group list and created its own group: become the host instead
-        if (beaconing && !link)
+        if (beaconing && !hostLink)
         {
             reset();
             return Action::RunFrame;
@@ -501,96 +675,154 @@ NetplayLobby::Action NetplayLobby::poll(MelonInstance& console, bool softwareRen
             reset();
             return Action::RunFrame;
         }
-        if (!link)
+        if (!hostLink)
         {
             std::string address;
-            if (findHost(gameCode, address))
+            uint16_t port = 0;
+            if (findHost(gameCode, address, port))
             {
-                link = std::make_unique<NetplayLink>();
-                if (!link->join(address, kSessionPort))
+                hostLink = std::make_unique<NetplayLink>();
+                if (!hostLink->join(address, port))
                 {
-                    link.reset();
+                    hostLink.reset();
                     return Action::RunFrame;
                 }
                 hostAddress = address;
+                hostPort = port;
                 lastConnectMs = now;
-                LOGI("found a host at %s", address.c_str());
+                LOGI("found a host at %s:%u", address.c_str(), port);
             }
             return Action::RunFrame;
         }
 
-        NetplayLink::Event ev = receive(receivedPacket);
+        NetplayLink::Event ev = pollLink(*hostLink, 0, messages);
         if (ev == NetplayLink::Event::Connected)
             sendHello(nds);
-        // (a rejection can arrive together with the disconnect: handle it first)
-        if ((ev == NetplayLink::Event::Disconnected && receivedPacket.empty()) || (!link->isConnected() && receivedPacket.empty() && now - lastConnectMs > kConnectTimeoutMs))
+        bool rejectedHere = false, welcomedHere = false;
+        for (auto& m : messages)
         {
-            link.reset();
-            return Action::RunFrame;
+            if (m.empty()) continue;
+            if (m[0] == MsgReject)
+            {
+                setMessage(std::string(m.begin() + 1, m.end()));
+                rejectedHere = true;
+            }
+            else if (m[0] == MsgWelcome)
+                welcomedHere = true;
         }
-        if (!receivedPacket.empty() && receivedPacket[0] == MsgReject)
+        if (rejectedHere)
         {
-            setMessage(std::string(receivedPacket.begin() + 1, receivedPacket.end()));
             reset();
             return Action::RunFrame;
         }
-        if (!receivedPacket.empty() && receivedPacket[0] == MsgState)
+        if (welcomedHere)
         {
-            SessionStart start;
-            if (!readState(receivedPacket.data(), receivedPacket.size(), start.remoteState, start.remoteFirmware)
-                || !snapshot(nds, start.ownState, ownFirmware))
+            welcomed = true;
+            setPhase(Phase::Joined);
+            LOGI("joined the lobby of %s", hostAddress.c_str());
+            return Action::RunFrame;
+        }
+        // (a rejection can arrive together with the disconnect: handled above first)
+        if (ev == NetplayLink::Event::Disconnected || (!hostLink->isConnected() && now - lastConnectMs > kConnectTimeoutMs))
+        {
+            // A full slot or a race with another joiner: look at the adverts again
+            hostLink.reset();
+            return Action::RunFrame;
+        }
+        return Action::RunFrame;
+    }
+
+    case Phase::Joined:
+    {
+        if (!mp->wirelessOn.load() || beaconing)
+        {
+            reset(); // the game left the group list
+            return Action::RunFrame;
+        }
+        NetplayLink::Event ev = pollLink(*hostLink, 0, messages);
+        for (size_t i = 0; i < messages.size(); i++)
+        {
+            const std::vector<uint8_t>& m = messages[i];
+            if (m.size() < 3 || m[0] != MsgStart)
+                continue;
+            int count = m[1], sid = m[2];
+            if (count < 2 || count > 8 || sid < 1 || sid >= count || m.size() < (size_t) (3 + 4 * (count - 1)))
             {
-                setMessage("could not read the host's console");
+                setMessage("bad start message from the host");
                 reset();
                 return Action::RunFrame;
             }
-            sendState(start.ownState, ownFirmware);
-            start.isHost = false;
-            start.link = std::move(link);
-            pending = std::move(start);
+            if (count > maxPlayers)
+            {
+                setMessage("this device cannot run that many players");
+                reset();
+                return Action::RunFrame;
+            }
+            if (!snapshot(nds, ownState, ownFirmware))
+            {
+                reset();
+                return Action::RunFrame;
+            }
+            std::vector<std::string> ips(count); // by session id, host (0) unused
+            for (int s = 1; s < count; s++)
+            {
+                in_addr a {};
+                memcpy(&a.s_addr, &m[3 + 4 * (s - 1)], 4);
+                char text[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &a, text, sizeof(text));
+                ips[s] = text;
+            }
+            beginExchange(sid, count);
+            links[0] = std::move(hostLink);
+            for (int a = 1; a < sid; a++)
+            {
+                links[a] = std::make_unique<NetplayLink>();
+                if (!links[a]->join(ips[a], meshPort(a, sid)))
+                {
+                    setMessage("could not connect to another player");
+                    reset();
+                    return Action::RunFrame;
+                }
+            }
+            for (int b = sid + 1; b < count; b++)
+            {
+                links[b] = std::make_unique<NetplayLink>();
+                if (!links[b]->host(meshPort(sid, b)))
+                {
+                    setMessage("could not open a port for another player");
+                    reset();
+                    return Action::RunFrame;
+                }
+            }
+            // Whatever followed the start message on the host link (its console state) is handled now
+            for (size_t k = i + 1; k < messages.size(); k++)
+                if (!messages[k].empty() && messages[k][0] == MsgState && !stateGot[0])
+                {
+                    if (!readState(messages[k].data(), messages[k].size(), peerState[0], peerFirmware[0]))
+                    {
+                        setMessage("could not read the host's console");
+                        reset();
+                        return Action::RunFrame;
+                    }
+                    stateGot[0] = 1;
+                }
+            closeUdp();
+            setPhase(Phase::Exchanging);
+            exchangeStartMs = now;
+            LOGI("starting with %d players (own session id %d)", count, sid);
+            return Action::HoldFrame;
+        }
+        if (ev == NetplayLink::Event::Disconnected || !hostLink->isConnected())
+        {
+            setMessage("the host closed the group");
             reset();
-            return Action::StartSession;
+            return Action::RunFrame;
         }
         return Action::RunFrame;
     }
 
     case Phase::Exchanging:
-    {
-        if (now - exchangeStartMs > kExchangeTimeoutMs)
-        {
-            setMessage("the other device did not send its console in time");
-            reset();
-            return Action::RunFrame;
-        }
-        // This console is held still: spend part of the frame receiving (the joiner's console is a few MB)
-        NetplayLink::Event ev = NetplayLink::Event::None;
-        receivedPacket.clear();
-        for (int i = 0; i < 4 && receivedPacket.empty() && ev != NetplayLink::Event::Disconnected; i++)
-            ev = link->service(4, [&](const uint8_t* d, size_t s) { keepPacket(receivedPacket, d, s); });
-        if (ev == NetplayLink::Event::Disconnected)
-        {
-            setMessage("the other device disconnected");
-            reset();
-            return Action::RunFrame;
-        }
-        if (!receivedPacket.empty() && receivedPacket[0] == MsgState)
-        {
-            SessionStart start;
-            if (!readState(receivedPacket.data(), receivedPacket.size(), start.remoteState, start.remoteFirmware))
-            {
-                setMessage("could not read the joiner's console");
-                reset();
-                return Action::RunFrame;
-            }
-            start.isHost = true;
-            start.ownState = std::move(ownState);
-            start.link = std::move(link);
-            pending = std::move(start);
-            reset();
-            return Action::StartSession;
-        }
-        return Action::HoldFrame;
-    }
+        return exchange(now);
     }
     return Action::RunFrame;
 }

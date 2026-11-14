@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <cstring>
 #include <limits>
+#include <time.h>
 #include "NDS.h"
 
 #define TAG "NetplayMP"
@@ -52,20 +53,27 @@ void DeterministicMP::registerInstance(int inst, NDS* nds)
 
 void DeterministicMP::updateMacClashLocked()
 {
-    macClash = instances[0].registered && instances[1].registered && instances[0].mac == instances[1].mac;
+    // Any two registered consoles with the same MAC is a clash. Aliases are distinct per session id and depend only
+    // on the real MACs, so every device derives the same ones.
+    static const u8 kAliasXor[kMaxInstances] = { 0x5A, 0xA5, 0x3C, 0xC3, 0x69, 0x96, 0x0F, 0xF0, 0x17, 0x71, 0x1B, 0xB1, 0x27, 0x72, 0x2D, 0xD2 };
+    macClash = false;
+    for (int a = 0; a < kMaxInstances; a++)
+        for (int b = a + 1; b < kMaxInstances; b++)
+            if (instances[a].registered && instances[b].registered && instances[a].mac == instances[b].mac)
+                macClash = true;
     if (!macClash)
         return;
-    for (int s = 0; s < 2; s++)
+    for (int s = 0; s < kMaxInstances; s++)
     {
         macAlias[s] = instances[s].mac;
-        macAlias[s][5] ^= (s == 0) ? 0x5A : 0xA5;
+        macAlias[s][5] ^= kAliasXor[s];
     }
-    LOGI("both consoles have the same MAC address: showing them different addresses for each other");
+    LOGI("some consoles share a MAC address: showing every console a different address for the others");
 }
 
 void DeterministicMP::translateMacs(int from, int to, u8* frame, size_t length) const
 {
-    if (!macClash || from < 0 || from > 1 || to < 0 || to > 1 || length < 12 + 22)
+    if (!macClash || from < 0 || from >= kMaxInstances || to < 0 || to >= kMaxInstances || length < 12 + 22)
         return;
     const auto& real = instances[from].mac;
     for (size_t offset : { 12 + 4, 12 + 10, 12 + 16 }) // addr1, addr2, addr3
@@ -143,6 +151,7 @@ void DeterministicMP::publishLocked(int inst, uint64_t time)
 void DeterministicMP::changedLocked()
 {
     epoch++;
+    epochAtomic.store(epoch, std::memory_order_release);
     cv.notify_all();
 }
 
@@ -244,7 +253,30 @@ bool DeterministicMP::waitFor(std::unique_lock<std::mutex>& lock, int inst, uint
         if (me.forced)
             continue;
 
-        cv.wait(lock);
+        {
+            // Spin briefly before sleeping: waking a sleeping thread costs far more than the usual wait, and with
+            // several consoles the threads hand off to each other thousands of times per frame
+            uint64_t seen = epoch;
+            lock.unlock();
+            timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+            for (int i = 0; epochAtomic.load(std::memory_order_acquire) == seen; i++)
+            {
+#if defined(__aarch64__) || defined(__arm__)
+                __asm__ volatile("yield");
+#elif defined(__x86_64__) || defined(__i386__)
+                __asm__ volatile("pause");
+#endif
+                if ((i & 63) == 63)
+                {
+                    timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+                    if ((t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec) > 300000)
+                        break;
+                }
+            }
+            lock.lock();
+            if (epoch == seen)
+                cv.wait(lock);
+        }
     }
 }
 
@@ -458,7 +490,14 @@ u16 DeterministicMP::RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask)
 
     uint64_t t = now(inst);
     publishLocked(inst, t);
-    uint64_t deadline = t + kReplyWindow;
+    // Every client replies in its own slot after the CMD, so the window must grow with the number of clients (a fixed 2 ms
+    // fits one reply; with two clients the second reply lands later and was dropped as "late": game "Communication error").
+    // Depends only on how many consoles the session has, so every device uses the same value.
+    int sessionClients = 0;
+    for (int j = 0; j < kMaxInstances; j++)
+        if (j != inst && instances[j].registered)
+            sessionClients++;
+    uint64_t deadline = t + kReplyWindow * (uint64_t) std::max(1, sessionClients);
     uint64_t roundTime = cmdTime;
 
     waitFor(lock, inst, deadline, [&] {
@@ -507,3 +546,4 @@ u16 DeterministicMP::RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask)
 }
 
 }
+

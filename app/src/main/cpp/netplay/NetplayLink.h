@@ -31,6 +31,7 @@ public:
     bool isConnected() const { return peer != nullptr && connected; }
     uint32_t rttMs() const;     // ENet smoothed round trip time
     uint32_t rttVarianceMs() const;
+    std::string peerAddress() const; // IPv4 text of the connected peer, empty if none
 
     // Waits up to timeoutMs for traffic; calls onPacket for each packet received. Returns the last
     // connection event seen.

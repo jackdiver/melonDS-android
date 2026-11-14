@@ -25,241 +25,12 @@ using namespace melonDS;
 namespace MelonDSAndroid
 {
 
-MirrorSession::~MirrorSession()
-{
-    stop();
-}
-
-void MirrorSession::setThreadedRendering(NDS* nds, bool threaded)
-{
-    if (nds->GPU.GetRenderer3D().Accelerated)
-        return;
-    static_cast<SoftRenderer&>(nds->GPU.GetRenderer3D()).SetThreaded(threaded, nds->GPU);
-}
-
-bool MirrorSession::start(std::shared_ptr<MelonInstance> primaryInstance, std::shared_ptr<MelonInstance> mirrorInstance)
-{
-    if (active)
-        stop();
-
-    // Threaded 3D rendering is deterministic (replays match across phones); the mismatches once blamed on it
-    // came from the divider/sqrt savestate gap. It roughly halves frame time during races.
-    setThreadedRendering(primaryInstance->getNds(), true);
-
-    if (!mirrorInstance->cloneFrom(*primaryInstance))
-    {
-        LOGE("failed to clone the primary console into the mirror");
-        return false;
-    }
-
-    primaryInstance->setRewindBlocked(true); // rewinding would change one console behind the other device's back
-    primary = std::move(primaryInstance);
-    mirror = std::move(mirrorInstance);
-    mirror->useMirrorRenderer(); // draws nothing unless the game captures the screen into VRAM
-
-    // GBA slot accessories (Motion Pak, rumble...) read live phone sensors: never allowed in netplay
-    for (int i = 0; i < 2; i++)
-    {
-        NDS* nds = getInstanceUnchecked(i)->getNds();
-        auto* gbaCart = nds->GetGBACart();
-        if (gbaCart)
-            nds->EjectGBACart();
-    }
-
-    installLink();
-    forceSilentMic = true;
-    primary->setInputHook([this](FrameInput& input) { inputHook(sidPrimary, input); });
-    mirror->setInputHook([this](FrameInput& input) { inputHook(sidMirror, input); });
-
-    primary->setPresentationSource([this]() -> NDS* {
-        if (focus.load() == 1)
-        {
-            // Show the mirror: its frame must be complete before its framebuffer is uploaded
-            waitForMirror();
-            return mirror->getNds();
-        }
-        return primary->getNds();
-    });
-
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        quit = false;
-        framesRequested = 0;
-        framesDone = 0;
-    }
-    worker = std::thread(&MirrorSession::workerLoop, this);
-    pthread_setname_np(worker.native_handle(), "MirrorEmuThread");
-
-    focus = 0;
-    active = true;
-    LOGI("mirror session started (primary inst %d, mirror inst %d)", primary->getInstanceId(), mirror->getInstanceId());
-    return true;
-}
-
-void MirrorSession::stop()
-{
-    if (!active)
-        return;
-
-    active = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        quit = true;
-    }
-    if (mp)
-        mp->shutdown();
-    cv.notify_all();
-    if (worker.joinable())
-        worker.join();
-
-    netEnd("session stopped");
-    if (netAutoStop && primary)
-        primary->getNds()->AREngine.Cheats = savedCheats;
-    forceSilentMic = false;
-    primary->setRewindBlocked(false);
-    primary->setInputHook(nullptr);
-    primary->setPresentationSource(nullptr);
-    primary->clearInput();
-    MPInterface::Set(MPInterface_Dummy);
-    mp = nullptr;
-    mirror.reset();
-    primary.reset();
-    LOGI("mirror session stopped");
-    sidPrimary = 0;
-    sidMirror = 1;
-    netAutoStop = false;
-}
-
-void MirrorSession::workerLoop()
-{
-    int mirrorId = mirror->getInstanceId();
-    for (;;)
-    {
-        {
-            std::unique_lock<std::mutex> lock(mutex);
-            cv.wait(lock, [&] { return quit || framesRequested > framesDone; });
-            if (quit)
-                return;
-        }
-
-        mp->setAtBarrier(mirrorId, false);
-        mirror->runFrameHeadless();
-        mp->setAtBarrier(mirrorId, true);
-
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            framesDone++;
-        }
-        cv.notify_all();
-    }
-}
-
-void MirrorSession::waitForMirror()
-{
-    if (waitedThisFrame)
-        return;
-
-    // Park the primary at the frame barrier so the mirror can finish (and so deadlocks resolve)
-    mp->setAtBarrier(primary->getInstanceId(), true);
-    std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return quit || framesDone >= framesRequested; });
-    waitedThisFrame = true;
-}
-
-void MirrorSession::installLink()
-{
-    // A fresh link: its state (inboxes, connection times) is not part of savestates, so every session starts
-    // from an empty one
-    auto link = std::make_unique<DeterministicMP>();
-    link->mapInstance(primary->getInstanceId(), sidPrimary);
-    link->mapInstance(mirror->getInstanceId(), sidMirror);
-    link->registerInstance(primary->getInstanceId(), primary->getNds());
-    link->registerInstance(mirror->getInstanceId(), mirror->getNds());
-    for (MelonInstance* console : { primary.get(), mirror.get() })
-        if (console->getNds()->Wifi.IsPowerOn())
-            link->markConnected(console->getInstanceId());
-    mp = link.get();
-    MPInterface::SetCustom(std::move(link), MPInterface_Netplay);
-}
-
-// Runs on the thread of console `sid` at the start of its frame
-void MirrorSession::inputHook(int sid, FrameInput& input)
-{
-    if (netPhase.load() == NetPhase::Running)
-        netInputHook(sid, input);
-}
-
-u32 MirrorSession::runFrame()
-{
-    handleNetRequest();
-    if (net)
-        netBeforeFrame();
-
-    auto kickMirror = [this] {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            framesRequested++;
-            waitedThisFrame = false;
-        }
-        cv.notify_all();
-    };
-
-    // Both consoles are marked running before either starts: otherwise one can briefly look parked at the
-    // previous frame end and the link's deadlock rule would release the other early, depending on thread timing
-    mp->setAtBarrier(primary->getInstanceId(), false);
-    mp->setAtBarrier(mirror->getInstanceId(), false);
-    kickMirror();
-
-    u32 lines = primary->runFrame();
-    waitForMirror();
-
-    if (netPhase.load() == NetPhase::Running)
-        netAfterFrame();
-    return lines;
-}
-
-void MirrorSession::setFocus(int index)
-{
-    int previous = focus.exchange(index == 1 ? 1 : 0);
-    if (previous != focus.load())
-    {
-        // Release anything held on the console that loses focus
-        MelonInstance* old = getInstance(previous);
-        if (old)
-            old->clearInput();
-        LOGI("focus -> console %d", focus.load());
-    }
-}
-
-MelonInstance* MirrorSession::inputTarget()
-{
-    return getInstance(focus.load());
-}
-
-MelonInstance* MirrorSession::getInstanceUnchecked(int index)
-{
-    return index == 1 ? mirror.get() : primary.get();
-}
-
-MelonInstance* MirrorSession::getInstance(int index)
-{
-    if (!active)
-        return nullptr;
-    return index == 1 ? mirror.get() : primary.get();
-}
-
-
-// ---------------------------------------------------------------------------------------------------------------
-// Phase 3: two-device netplay. Both devices run both consoles; only inputs travel over the network.
-// Host = console 0, joiner = console 1. Each side's local input is delayed by `netDelay` frames so the other side
-// normally has it before it is needed; if not, the frame waits (stall).
-// ---------------------------------------------------------------------------------------------------------------
 namespace
 {
-enum NetMsg : uint8_t { MsgInput = 4, MsgHash = 5 };
+enum NetMsg : uint8_t { MsgInput = 4, MsgHash = 5, MsgBye = 6 };
 constexpr int kInputRedundancy = 16;
 constexpr uint32_t kHashInterval = 60;
-constexpr uint64_t kStallGiveUpMs = 600000; // the other device may be paused; a lost connection is detected by the link itself
+constexpr uint64_t kStallGiveUpMs = 600000; // another device may be paused; a lost connection is detected by the link itself
 const FrameInput kNeutralInput { 0xFFF, 0, 0, 0, 0, {0, 0} };
 
 uint64_t nowMs()
@@ -283,9 +54,291 @@ template <typename T> bool get(const uint8_t*& p, const uint8_t* end, T& value)
 }
 }
 
+MirrorSession::~MirrorSession()
+{
+    stop();
+}
+
+void MirrorSession::setThreadedRendering(NDS* nds, bool threaded)
+{
+    if (nds->GPU.GetRenderer3D().Accelerated)
+        return;
+    static_cast<SoftRenderer&>(nds->GPU.GetRenderer3D()).SetThreaded(threaded, nds->GPU);
+}
+
+bool MirrorSession::begin(std::shared_ptr<MelonInstance> primaryInstance, std::vector<std::shared_ptr<MelonInstance>> mirrors, int self)
+{
+    if (active)
+        stop();
+
+    int count = (int) mirrors.size() + 1;
+    if (count < 2 || count > kMaxPlayers || self < 0 || self >= count)
+        return false;
+
+    // Threaded 3D rendering is deterministic (replays match across phones); the mismatches once blamed on it
+    // came from the divider/sqrt savestate gap. It roughly halves frame time during races.
+    setThreadedRendering(primaryInstance->getNds(), true);
+
+    for (auto& mirror : mirrors)
+    {
+        if (!mirror->cloneFrom(*primaryInstance))
+        {
+            LOGE("failed to clone the primary console into a mirror");
+            return false;
+        }
+    }
+
+    primaryInstance->setRewindBlocked(true); // rewinding would change one console behind the other devices' backs
+    selfSid = self;
+    consoles.clear();
+    size_t next = 0;
+    for (int sid = 0; sid < count; sid++)
+        consoles.push_back(sid == self ? primaryInstance : mirrors[next++]);
+    primary = primaryInstance.get();
+    for (int sid = 0; sid < count; sid++)
+        if (sid != self)
+            consoles[sid]->useMirrorRenderer(); // draws nothing unless the game captures the screen into VRAM
+
+    // GBA slot accessories (Motion Pak, rumble...) read live phone sensors: never allowed in netplay
+    for (auto& console : consoles)
+    {
+        NDS* nds = console->getNds();
+        if (nds->GetGBACart())
+            nds->EjectGBACart();
+    }
+
+    installLink();
+    forceSilentMic = true;
+    for (int sid = 0; sid < count; sid++)
+        consoles[sid]->setInputHook([this, sid](FrameInput& input) { inputHook(sid, input); });
+
+    primary->setPresentationSource([this]() -> NDS* {
+        int f = focus.load();
+        if (f != 0)
+        {
+            // Show another console: its frame must be complete before its framebuffer is uploaded
+            waitForMirrors();
+            MelonInstance* shown = getInstanceUnchecked(f);
+            return (shown ? shown : primary)->getNds();
+        }
+        return primary->getNds();
+    });
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        quit = false;
+        framesRequested = 0;
+        framesDone = 0;
+        workerCount = count - 1;
+    }
+    for (int sid = 0; sid < count; sid++)
+    {
+        if (sid == self)
+            continue;
+        workers.emplace_back(&MirrorSession::workerLoop, this, consoles[sid].get());
+        pthread_setname_np(workers.back().native_handle(), "MirrorEmuThread");
+    }
+
+    focus = 0;
+    active = true;
+    LOGI("mirror session started (%d consoles, own session id %d)", count, self);
+    return true;
+}
+
+void MirrorSession::stop()
+{
+    if (!active)
+        return;
+
+    active = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        quit = true;
+    }
+    if (mp)
+        mp->shutdown();
+    cv.notify_all();
+    for (auto& worker : workers)
+        if (worker.joinable())
+            worker.join();
+    workers.clear();
+
+    netEnd("session stopped");
+    if (netAutoStop && primary)
+        primary->getNds()->AREngine.Cheats = savedCheats;
+    forceSilentMic = false;
+    primary->setRewindBlocked(false);
+    primary->setInputHook(nullptr);
+    primary->setPresentationSource(nullptr);
+    primary->clearInput();
+    MPInterface::Set(MPInterface_Dummy);
+    mp = nullptr;
+    consoles.clear(); // the primary instance stays alive: the caller holds it
+    primary = nullptr;
+    LOGI("mirror session stopped");
+    selfSid = 0;
+    netAutoStop = false;
+}
+
+void MirrorSession::workerLoop(MelonInstance* console)
+{
+    int id = console->getInstanceId();
+    uint64_t done = 0;
+    for (;;)
+    {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [&] { return quit || framesRequested > done; });
+            if (quit)
+                return;
+        }
+
+        mp->setAtBarrier(id, false);
+        console->runFrameHeadless();
+        mp->setAtBarrier(id, true);
+        done++;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            framesDone++;
+        }
+        cv.notify_all();
+    }
+}
+
+void MirrorSession::waitForMirrors()
+{
+    if (waitedThisFrame)
+        return;
+
+    // Park the primary at the frame barrier so the mirrors can finish (and so deadlocks resolve)
+    mp->setAtBarrier(primary->getInstanceId(), true);
+    std::unique_lock<std::mutex> lock(mutex);
+    cv.wait(lock, [&] { return quit || framesDone >= framesRequested * workerCount; });
+    waitedThisFrame = true;
+}
+
+void MirrorSession::installLink()
+{
+    // A fresh link: its state (inboxes, connection times) is not part of savestates, so every session starts
+    // from an empty one
+    auto link = std::make_unique<DeterministicMP>();
+    for (int sid = 0; sid < (int) consoles.size(); sid++)
+    {
+        MelonInstance* console = consoles[sid].get();
+        link->mapInstance(console->getInstanceId(), sid);
+        link->registerInstance(console->getInstanceId(), console->getNds());
+    }
+    for (auto& console : consoles)
+        if (console->getNds()->Wifi.IsPowerOn())
+            link->markConnected(console->getInstanceId());
+    mp = link.get();
+    MPInterface::SetCustom(std::move(link), MPInterface_Netplay);
+}
+
+// Runs on the thread of console `sid` at the start of its frame
+void MirrorSession::inputHook(int sid, FrameInput& input)
+{
+    if (netPhase.load() == NetPhase::Running)
+        netInputHook(sid, input);
+}
+
+u32 MirrorSession::runFrame()
+{
+    handleNetRequest();
+    if (!peers.empty())
+        netBeforeFrame();
+    if (!active)
+        return 263;
+
+    // All consoles are marked running before any starts: otherwise one can briefly look parked at the
+    // previous frame end and the link's deadlock rule would release another early, depending on thread timing
+    for (auto& console : consoles)
+        mp->setAtBarrier(console->getInstanceId(), false);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        framesRequested++;
+        waitedThisFrame = false;
+    }
+    cv.notify_all();
+
+    uint64_t computeStart = nowMs();
+    timespec ts0; clock_gettime(CLOCK_MONOTONIC, &ts0);
+    u32 lines = primary->runFrame();
+    timespec ts1; clock_gettime(CLOCK_MONOTONIC, &ts1);
+    waitForMirrors();
+    {
+        timespec ts2; clock_gettime(CLOCK_MONOTONIC, &ts2);
+        double primaryMs = (ts1.tv_sec - ts0.tv_sec) * 1000.0 + (ts1.tv_nsec - ts0.tv_nsec) / 1e6;
+        double totalMs = (ts2.tv_sec - ts0.tv_sec) * 1000.0 + (ts2.tv_nsec - ts0.tv_nsec) / 1e6;
+        netPrimaryMsSum += primaryMs; netComputeMsSum += totalMs; netComputeFrames++;
+        if (totalMs > netComputeMsMax) netComputeMsMax = totalMs;
+    }
+    (void) computeStart;
+
+    if (netPhase.load() == NetPhase::Running)
+        netAfterFrame();
+    return lines;
+}
+
+void MirrorSession::setFocus(int index)
+{
+    int count = (int) consoles.size();
+    int wanted = (index >= 0 && index < count) ? index : 0;
+    int previous = focus.exchange(wanted);
+    if (previous != focus.load())
+    {
+        // Release anything held on the console that loses focus
+        MelonInstance* old = getInstance(previous);
+        if (old)
+            old->clearInput();
+        LOGI("focus -> console %d", focus.load());
+    }
+}
+
+MelonInstance* MirrorSession::inputTarget()
+{
+    return getInstance(focus.load());
+}
+
+MelonInstance* MirrorSession::getInstanceUnchecked(int index)
+{
+    if (index <= 0 || consoles.empty())
+        return primary;
+    // k-th other console in session id order
+    int seen = 0;
+    for (int sid = 0; sid < (int) consoles.size(); sid++)
+    {
+        if (sid == selfSid)
+            continue;
+        if (++seen == index)
+            return consoles[sid].get();
+    }
+    return primary;
+}
+
+MelonInstance* MirrorSession::getInstance(int index)
+{
+    if (!active)
+        return nullptr;
+    return getInstanceUnchecked(index);
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------
+// Netplay: every device runs every console; only inputs travel over the network, over a full mesh of links (one per
+// other device). Each device's local input is delayed by `netDelay` frames so the others normally have it before it is
+// needed; if not, the frame waits (stall).
+// ---------------------------------------------------------------------------------------------------------------
+
 void MirrorSession::requestNetStop()
 {
     netStopRequested = true;
+}
+
+bool MirrorSession::netLinksUp() const
+{
+    return !peers.empty();
 }
 
 void MirrorSession::handleNetRequest()
@@ -296,7 +349,7 @@ void MirrorSession::handleNetRequest()
 
 void MirrorSession::netEnd(const char* reason)
 {
-    if (netPhase.load() == NetPhase::Off && !net)
+    if (netPhase.load() == NetPhase::Off && peers.empty())
         return;
     {
         std::lock_guard<std::mutex> lock(netRequestMutex);
@@ -307,18 +360,27 @@ void MirrorSession::netEnd(const char* reason)
              netHashChecks, netDesyncs, (unsigned long long) netStallMs);
     else
         LOGI("netplay ended: %s", reason);
-    if (net)
+    // Tell everyone, so they end at once instead of waiting for a timeout
+    std::vector<uint8_t> bye { MsgBye };
+    for (Peer& peer : peers)
     {
-        net->close();
-        net.reset();
+        if (peer.link && peer.link->isConnected())
+        {
+            peer.link->send(bye.data(), bye.size(), true);
+            peer.link->flush();
+        }
     }
+    for (Peer& peer : peers)
+        if (peer.link)
+            peer.link->close();
+    peers.clear();
     netPhase = NetPhase::Off;
 }
 
-bool MirrorSession::loadStateFresh(int index, const uint8_t* data, size_t size)
+bool MirrorSession::loadStateFresh(MelonInstance* console, const uint8_t* data, size_t size)
 {
     // Same path as snapshotAndReload: reset to launch defaults, then load (cold JIT, no leftover state)
-    NDS* nds = getInstanceUnchecked(index)->getNds();
+    NDS* nds = console->getNds();
     ScopedCurrentNds currentGuard(nds);
     nds->Reset();
     std::string romName;
@@ -327,11 +389,11 @@ bool MirrorSession::loadStateFresh(int index, const uint8_t* data, size_t size)
     std::vector<u8> copy(data, data + size);
     Savestate load(copy.data(), (u32) copy.size(), false);
     bool ok = !load.Error && nds->DoSavestate(&load) && !load.Error;
-    getInstanceUnchecked(index)->clearInput();
+    console->clearInput();
     return ok;
 }
 
-void MirrorSession::netOnPacket(const uint8_t* data, size_t size)
+void MirrorSession::netOnPacket(Peer& peer, const uint8_t* data, size_t size)
 {
     if (size < 1) return;
     const uint8_t* p = data + 1;
@@ -346,7 +408,7 @@ void MirrorSession::netOnPacket(const uint8_t* data, size_t size)
         {
             FrameInput in;
             if (!get(p, end, in)) return;
-            InputSlot& slot = netRemote[(first + i) % kInputRing];
+            InputSlot& slot = remoteSlot(peer.sid, first + i);
             slot.frame = first + i;
             slot.input = in;
         }
@@ -354,11 +416,20 @@ void MirrorSession::netOnPacket(const uint8_t* data, size_t size)
     }
     case MsgHash:
     {
-        uint32_t frame; uint64_t h0, h1;
-        if (!get(p, end, frame) || !get(p, end, h0) || !get(p, end, h1)) return;
-        netRemoteHashes.push_back({ frame, { h0, h1 } });
+        HashEntry entry; uint8_t count;
+        if (!get(p, end, entry.frame) || !get(p, end, count)) return;
+        for (uint8_t i = 0; i < count; i++)
+        {
+            uint64_t h;
+            if (!get(p, end, h)) return;
+            entry.hashes.push_back(h);
+        }
+        peer.hashes.push_back(std::move(entry));
         break;
     }
+    case MsgBye:
+        peer.byeReceived = true;
+        break;
     default:
         break;
     }
@@ -375,26 +446,48 @@ void MirrorSession::netSendInputs()
     put(msg, (uint8_t) count);
     for (uint32_t f = first; f <= netLocalLast; f++)
         put(msg, netLocal[f % kInputRing].input);
-    net->send(msg.data(), msg.size(), false);
-    net->flush();
+    for (Peer& peer : peers)
+    {
+        peer.link->send(msg.data(), msg.size(), false);
+        peer.link->flush();
+    }
 }
 
-// Emulator thread, before the frame: waits until the other device's input for this frame has arrived.
-// Returns true when the frame can run (also when the session just ended).
+// Services every link without waiting longer than `timeoutMs` in total on the first one. Returns false when a peer is
+// gone (the session has been ended).
+bool MirrorSession::servicePeers(int timeoutMs)
+{
+    for (size_t i = 0; i < peers.size(); i++)
+    {
+        Peer& peer = peers[i];
+        NetplayLink::Event ev = peer.link->service(i == 0 ? timeoutMs : 0, [&](const uint8_t* d, size_t s) { netOnPacket(peer, d, s); });
+        if (peer.byeReceived)
+        {
+            netEnd("another player stopped");
+            return false;
+        }
+        if (ev == NetplayLink::Event::Disconnected || !peer.link->isConnected())
+        {
+            netEnd("another player disconnected");
+            return false;
+        }
+    }
+    return true;
+}
+
+// Emulator thread, before the frame: waits until every other device's input for this frame has arrived.
 bool MirrorSession::netBeforeFrame()
 {
-    auto onPacket = [this](const uint8_t* d, size_t s) { netOnPacket(d, s); };
-
     uint64_t start = 0, lastSend = 0;
     for (;;)
     {
-        NetplayLink::Event ev = net->service(0, onPacket);
-        if (ev == NetplayLink::Event::Disconnected || !net->isConnected())
-        {
-            netEnd("peer disconnected");
+        if (!servicePeers(0))
             return true;
-        }
-        if (netRemote[netFrame % kInputRing].frame == netFrame)
+        bool missing = false;
+        for (Peer& peer : peers)
+            if (remoteSlot(peer.sid, netFrame).frame != netFrame)
+                missing = true;
+        if (!missing)
             break;
         if (netStopRequested.exchange(false))
         {
@@ -403,7 +496,13 @@ bool MirrorSession::netBeforeFrame()
         }
 
         uint64_t now = nowMs();
-        if (start == 0) start = lastSend = now;
+        if (start == 0)
+        {
+            start = lastSend = now;
+            for (Peer& peer : peers)
+                if (remoteSlot(peer.sid, netFrame).frame != netFrame)
+                    netLateBySid[peer.sid]++;
+        }
         if (now - start > 1000)
             netStalled = true;
         if (now - lastSend >= 16)
@@ -413,12 +512,18 @@ bool MirrorSession::netBeforeFrame()
         }
         if (now - start > kStallGiveUpMs)
         {
-            netEnd("other device stopped sending input");
+            netEnd("another device stopped sending input");
             return true;
         }
-        // Short sleep until something arrives. A disconnect reported here must not be lost: it is picked up by the
-        // isConnected() check at the top of the loop.
-        net->service(2, onPacket);
+        // Short sleep until something arrives. A disconnect reported here is picked up by the next servicePeers().
+        for (Peer& peer : peers)
+        {
+            if (remoteSlot(peer.sid, netFrame).frame != netFrame)
+            {
+                peer.link->service(2, [&](const uint8_t* d, size_t s) { netOnPacket(peer, d, s); });
+                break;
+            }
+        }
     }
     netFramesSinceLog++;
     netStalled = false;
@@ -434,12 +539,12 @@ bool MirrorSession::netBeforeFrame()
     return true;
 }
 
-// Runs on the thread of console `index` at the start of its frame
-void MirrorSession::netInputHook(int index, FrameInput& input)
+// Runs on the thread of console `sid` at the start of its frame
+void MirrorSession::netInputHook(int sid, FrameInput& input)
 {
-    if (index == netLocalIndex)
+    if (sid == selfSid)
     {
-        // The live input is applied `netDelay` frames from now (on both devices)
+        // The live input is applied `netDelay` frames from now (on every device)
         uint32_t target = netFrame + netDelay;
         netLocal[target % kInputRing] = InputSlot { target, input };
         netLocalLast = target;
@@ -449,9 +554,52 @@ void MirrorSession::netInputHook(int index, FrameInput& input)
     }
     else
     {
-        const InputSlot& slot = netRemote[netFrame % kInputRing];
+        const InputSlot& slot = remoteSlot(sid, netFrame);
         input = slot.frame == netFrame ? slot.input : kNeutralInput;
     }
+}
+
+void MirrorSession::netCompareHashes()
+{
+    for (Peer& peer : peers)
+    {
+        while (!peer.hashes.empty())
+        {
+            HashEntry& r = peer.hashes.front();
+            auto local = std::find_if(netLocalHashes.begin(), netLocalHashes.end(), [&](const HashEntry& e) { return e.frame == r.frame; });
+            if (local == netLocalHashes.end())
+            {
+                if (netLocalHashes.empty() || r.frame > netLocalHashes.back().frame)
+                    break; // our own hash for that frame is not ready yet
+                peer.hashes.pop_front(); // too old, nothing to compare with
+                continue;
+            }
+            netHashChecks++;
+            if (local->hashes != r.hashes)
+            {
+                netDesyncs++;
+                netDesyncsShown = netDesyncs;
+                std::string differing;
+                for (size_t c = 0; c < local->hashes.size() && c < r.hashes.size(); c++)
+                    if (local->hashes[c] != r.hashes[c])
+                        differing += " " + std::to_string(c);
+                LOGE("netplay: DESYNC at frame %u against player %d, console(s) differing:%s", r.frame, peer.sid, differing.c_str());
+            }
+            else if (netHashChecks % (10 * peers.size()) == 0)
+            {
+                LOGI("netplay: frame %u in sync (%u checks, %u desyncs, stall %llu ms); input late in %u of %u frames, worst wait %llu ms; rtt %u ms +-%u",
+                     r.frame, netHashChecks, netDesyncs, (unsigned long long) netStallMs, netLateFramesSinceLog, netFramesSinceLog,
+                     (unsigned long long) netMaxWaitSinceLog, peer.link->rttMs(), peer.link->rttVarianceMs());
+                if (netComputeFrames) { LOGI("compute per frame: own console %.1f ms, with hidden consoles %.1f ms avg, %.1f ms max (%u frames)", netPrimaryMsSum / netComputeFrames, netComputeMsSum / netComputeFrames, netComputeMsMax, netComputeFrames); netPrimaryMsSum = netComputeMsSum = netComputeMsMax = 0; netComputeFrames = 0; }
+                { std::string late; for (int s = 0; s < 16; s++) if (netLateBySid[s]) late += " p" + std::to_string(s) + ":" + std::to_string(netLateBySid[s]); LOGI("late by peer:%s", late.c_str()); for (auto& c : netLateBySid) c = 0; }
+                netFramesSinceLog = netLateFramesSinceLog = 0;
+                netMaxWaitSinceLog = 0;
+            }
+            peer.hashes.pop_front();
+        }
+    }
+    while (netLocalHashes.size() > 16)
+        netLocalHashes.pop_front();
 }
 
 void MirrorSession::netAfterFrame()
@@ -460,51 +608,26 @@ void MirrorSession::netAfterFrame()
 
     if (netFrame % kHashInterval == 0)
     {
-        uint64_t h0 = hashConsoleState(consoleBySession(0)->getNds());
-        uint64_t h1 = hashConsoleState(consoleBySession(1)->getNds());
-        netLocalHashes.push_back({ netFrame, { h0, h1 } });
+        HashEntry entry;
+        entry.frame = netFrame;
+        for (auto& console : consoles)
+            entry.hashes.push_back(hashConsoleState(console->getNds()));
         std::vector<uint8_t> msg { MsgHash };
         put(msg, netFrame);
-        put(msg, h0);
-        put(msg, h1);
-        net->send(msg.data(), msg.size(), true);
+        put(msg, (uint8_t) entry.hashes.size());
+        for (uint64_t h : entry.hashes)
+            put(msg, h);
+        netLocalHashes.push_back(std::move(entry));
+        for (Peer& peer : peers)
+            peer.link->send(msg.data(), msg.size(), true);
     }
 
-    // Compare whatever hashes both sides have
-    while (!netLocalHashes.empty() && !netRemoteHashes.empty())
-    {
-        auto& l = netLocalHashes.front();
-        auto& r = netRemoteHashes.front();
-        if (l.first < r.first) { netLocalHashes.erase(netLocalHashes.begin()); continue; }
-        if (r.first < l.first) { netRemoteHashes.erase(netRemoteHashes.begin()); continue; }
-        netHashChecks++;
-        if (l.second != r.second)
-        {
-            netDesyncs++;
-            netDesyncsShown = netDesyncs;
-            LOGE("netplay: DESYNC at frame %u (console 0 %s, console 1 %s)", l.first,
-                 l.second.first == r.second.first ? "ok" : "differs", l.second.second == r.second.second ? "ok" : "differs");
-        }
-        else if (netHashChecks % 10 == 0)
-            {
-            LOGI("netplay: frame %u in sync (%u checks, %u desyncs, stall %llu ms); input late in %u of %u frames, worst wait %llu ms; rtt %u ms +-%u",
-                 l.first, netHashChecks, netDesyncs, (unsigned long long) netStallMs, netLateFramesSinceLog, netFramesSinceLog,
-                 (unsigned long long) netMaxWaitSinceLog, net ? net->rttMs() : 0, net ? net->rttVarianceMs() : 0);
-            netFramesSinceLog = netLateFramesSinceLog = 0;
-            netMaxWaitSinceLog = 0;
-        }
-        netLocalHashes.erase(netLocalHashes.begin());
-        netRemoteHashes.erase(netRemoteHashes.begin());
-    }
+    netCompareHashes();
 
     netFrame++;
     netFrameShown = netFrame;
 }
 
-}
-
-namespace MelonDSAndroid
-{
 std::string MirrorSession::netStatus()
 {
     const char* phase = "off";
@@ -516,54 +639,54 @@ std::string MirrorSession::netStatus()
     std::lock_guard<std::mutex> lock(netRequestMutex);
     return std::string(phase) + " " + std::to_string(netFrameShown.load()) + " " + std::to_string(netDesyncsShown.load()) + " " + netMessage;
 }
-}
 
-namespace MelonDSAndroid
-{
 void MirrorSession::netBeginRunning()
 {
-    // Session starts at frame 0 on both devices
+    // Session starts at frame 0 on every device
     netFrame = 0;
-    for (InputSlot& s : netLocal) s = InputSlot();
-    for (InputSlot& s : netRemote) s = InputSlot();
-    // The first `netDelay` frames use neutral input on both sides
+    netLocal.assign(kInputRing, InputSlot());
+    netRemote.assign((size_t) consoles.size() * kInputRing, InputSlot());
+    // The first `netDelay` frames use neutral input everywhere
     for (uint32_t f = 0; f < (uint32_t) netDelay; f++)
     {
-        netLocal[f % kInputRing] = InputSlot { f, FrameInput { 0xFFF, 0, 0, 0, 0, {0, 0} } };
-        netRemote[f % kInputRing] = InputSlot { f, FrameInput { 0xFFF, 0, 0, 0, 0, {0, 0} } };
+        netLocal[f % kInputRing] = InputSlot { f, kNeutralInput };
+        for (int sid = 0; sid < (int) consoles.size(); sid++)
+            remoteSlot(sid, f) = InputSlot { f, kNeutralInput };
     }
     netLocalLast = netDelay - 1;
     netLocalCount = netDelay;
     netLocalHashes.clear();
-    netRemoteHashes.clear();
+    for (Peer& peer : peers)
+        peer.hashes.clear();
     netDesyncs = netHashChecks = 0;
     netStallMs = 0;
     netFrameShown = 0;
     netDesyncsShown = 0;
     netPhase = NetPhase::Running;
-    LOGI("netplay: running (%s, console %d is local)", netIsHost ? "host" : "client", netLocalIndex);
+    LOGI("netplay: running (%d players, console %d is local)", (int) consoles.size(), selfSid);
 }
 
-bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstance, std::shared_ptr<MelonInstance> mirrorInstance,
-                                    std::unique_ptr<NetplayLink> link, bool isHost, int inputDelay,
+bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstance, std::vector<std::shared_ptr<MelonInstance>> mirrors,
+                                    int self, std::vector<std::unique_ptr<NetplayLink>> links, int inputDelay,
                                     const std::vector<uint8_t>& ownState,
-                                    const std::vector<uint8_t>& remoteFirmware, const std::vector<uint8_t>& remoteState)
+                                    const std::vector<std::vector<uint8_t>>& remoteFirmware,
+                                    const std::vector<std::vector<uint8_t>>& remoteStates)
 {
-    // Each device keeps its own console as the primary instance; the other player's console is the mirror.
-    // Session ids are the same on both devices: host console = 0, joiner console = 1.
-    sidPrimary = isHost ? 0 : 1;
-    sidMirror = 1 - sidPrimary;
-    if (!start(std::move(primaryInstance), std::move(mirrorInstance)))
-    {
-        sidPrimary = 0;
-        sidMirror = 1;
+    // Each device keeps its own console as the primary instance; the other players' consoles are the mirrors.
+    // Session ids are the same on every device: host console = 0, joiners in join order.
+    int count = (int) mirrors.size() + 1;
+    if ((int) links.size() != count || (int) remoteFirmware.size() != count || (int) remoteStates.size() != count)
         return false;
-    }
+    if (!begin(std::move(primaryInstance), std::move(mirrors), self))
+        return false;
 
+    for (int sid = 0; sid < count; sid++)
     {
-        // Firmware (MAC, nickname, settings) is not part of savestates: the other player's console needs theirs
-        ScopedCurrentNds guard(mirror->getNds());
-        mirror->getNds()->SetFirmware(Firmware(remoteFirmware.data(), (u32) remoteFirmware.size()));
+        if (sid == selfSid)
+            continue;
+        // Firmware (MAC, nickname, settings) is not part of savestates: every other console needs its owner's
+        ScopedCurrentNds guard(consoles[sid]->getNds());
+        consoles[sid]->getNds()->SetFirmware(Firmware(remoteFirmware[sid].data(), (u32) remoteFirmware[sid].size()));
     }
     // This device's own console keeps this device's own save: loading a state writes the state's save data back
     // to the save file, so remember the save memory first and verify it is unchanged afterwards.
@@ -573,7 +696,11 @@ bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstan
         if (cart && cart->GetSaveMemory())
             ownSaveBefore.assign(cart->GetSaveMemory(), cart->GetSaveMemory() + cart->GetSaveMemoryLength());
     }
-    if (!loadStateFresh(0, ownState.data(), ownState.size()) || !loadStateFresh(1, remoteState.data(), remoteState.size()))
+    bool loaded = loadStateFresh(primary, ownState.data(), ownState.size());
+    for (int sid = 0; sid < count && loaded; sid++)
+        if (sid != selfSid)
+            loaded = loadStateFresh(consoles[sid].get(), remoteStates[sid].data(), remoteStates[sid].size());
+    if (!loaded)
     {
         LOGE("netplay: could not load the session states");
         restoreOwnSave(ownSaveBefore);
@@ -594,14 +721,21 @@ bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstan
     }
     // Cheats are per device (only this device's console has them): never active during a session
     savedCheats = primary->getNds()->AREngine.Cheats;
-    primary->getNds()->AREngine.Cheats.clear();
-    mirror->getNds()->AREngine.Cheats.clear();
+    for (auto& console : consoles)
+        console->getNds()->AREngine.Cheats.clear();
 
     installLink();
 
-    net = std::move(link);
-    netIsHost = isHost;
-    netLocalIndex = sidPrimary;
+    peers.clear();
+    for (int sid = 0; sid < count; sid++)
+    {
+        if (sid == selfSid)
+            continue;
+        Peer peer;
+        peer.sid = sid;
+        peer.link = std::move(links[sid]);
+        peers.push_back(std::move(peer));
+    }
     netDelay = inputDelay;
     netAutoStop = true;
     {
@@ -612,10 +746,7 @@ bool MirrorSession::startNetSession(std::shared_ptr<MelonInstance> primaryInstan
     netBeginRunning();
     return true;
 }
-}
 
-namespace MelonDSAndroid
-{
 // Puts the given save memory back into this device's own console (and, through the cartridge, its save file)
 void MirrorSession::restoreOwnSave(const std::vector<uint8_t>& saveMemory)
 {
@@ -627,17 +758,13 @@ void MirrorSession::restoreOwnSave(const std::vector<uint8_t>& saveMemory)
     if (cart)
         cart->SetSaveMemory(saveMemory.data(), (u32) saveMemory.size());
 }
-}
 
-namespace MelonDSAndroid
-{
 void MirrorSession::servicePaused()
 {
     handleNetRequest();
-    if (!net)
+    if (peers.empty())
         return;
-    NetplayLink::Event ev = net->service(0, [this](const uint8_t* d, size_t s) { netOnPacket(d, s); });
-    if (ev == NetplayLink::Event::Disconnected)
-        netEnd("peer disconnected");
+    servicePeers(0);
 }
+
 }

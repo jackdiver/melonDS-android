@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <vector>
 #include "net/MPInterface.h"
 
@@ -123,6 +124,7 @@ private:
     std::mutex mutex;
     std::condition_variable cv;
     uint64_t epoch = 0;
+    std::atomic<uint64_t> epochAtomic { 0 }; // copy of epoch that waiters can poll without the lock
     bool shuttingDown = false;
     Instance instances[kMaxInstances];
     int sessionOf[kMaxInstances] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -132,7 +134,7 @@ private:
     // so the link shows each console a *different* address for the other one by rewriting the three 802.11 address
     // fields of every frame that passes between them. Deterministic: depends only on the two real MACs.
     bool macClash = false;
-    std::array<melonDS::u8, 6> macAlias[2];
+    std::array<melonDS::u8, 6> macAlias[kMaxInstances];
     void updateMacClashLocked();
     void translateMacs(int from, int to, melonDS::u8* frame, size_t length) const;
 

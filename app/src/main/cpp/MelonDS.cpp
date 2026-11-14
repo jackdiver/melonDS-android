@@ -1,4 +1,5 @@
 #include <cstring>
+#include <unistd.h>
 #include <utility>
 #include <android/asset_manager.h>
 #include <oboe/Oboe.h>
@@ -216,14 +217,15 @@ namespace MelonDSAndroid
     }
 
     NetplayLobby lobby;
+    bool lobbyCapSet = false;
 
-    std::shared_ptr<MelonInstance> makeMirrorInstance()
+    std::shared_ptr<MelonInstance> makeMirrorInstance(int id = 1)
     {
-        auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, 1);
+        auto mirrorArgs = BuildArgsFromConfiguration(*currentConfiguration, id);
         if (!mirrorArgs.has_value())
             return nullptr;
         return std::make_shared<MelonInstance>(
-            1,
+            id,
             currentConfiguration,
             std::move(mirrorArgs.value()),
             net,
@@ -246,8 +248,24 @@ namespace MelonDSAndroid
             mirrorSession.servicePaused();
     }
 
+    // Most players this device can run: every device runs every console (about 125 MB of native memory per hidden
+    // console on top of ~570 MB, see docs/netplay-plan.md), so small phones get a lower limit.
+    static int deviceMaxPlayers()
+    {
+        double gigabytes = (double) sysconf(_SC_PHYS_PAGES) * (double) sysconf(_SC_PAGESIZE) / (1024.0 * 1024.0 * 1024.0);
+        if (gigabytes >= 7.5) return 8;
+        if (gigabytes >= 5.0) return 6;
+        if (gigabytes >= 3.5) return 4;
+        return 3;
+    }
+
     u32 loop()
     {
+        if (!lobbyCapSet)
+        {
+            lobby.setMaxPlayers(deviceMaxPlayers());
+            lobbyCapSet = true;
+        }
         if (mirrorSession.shouldEnd())
             mirrorSession.stop(); // lobby-started session over: back to this device's own console only
         if (mirrorSession.isActive())
@@ -261,9 +279,14 @@ namespace MelonDSAndroid
         case NetplayLobby::Action::StartSession:
         {
             NetplayLobby::SessionStart start = lobby.takeSessionStart();
-            auto mirror = makeMirrorInstance();
-            if (mirror && mirrorSession.startNetSession(instance, mirror, std::move(start.link), start.isHost, 2,
-                                                       start.ownState, start.remoteFirmware, start.remoteState))
+            // This device's console plus one hidden copy of every other player's console (ids 1..count-1)
+            std::vector<std::shared_ptr<MelonInstance>> mirrors;
+            for (int i = 1; i < start.count; i++)
+                if (auto mirror = makeMirrorInstance(i))
+                    mirrors.push_back(mirror);
+            if ((int) mirrors.size() == start.count - 1 &&
+                mirrorSession.startNetSession(instance, std::move(mirrors), start.selfSid, std::move(start.links), 2,
+                                              start.ownState, start.firmware, start.states))
                 return mirrorSession.runFrame();
             break;
         }

@@ -398,3 +398,115 @@ Run on a separate copy of the ROM (own save), real save untouched.
 - What N players would need: the session (MirrorSession) is hard-wired to primary + one mirror (worker, hashes, input, focus);
   the lobby accepts one joiner; the link (DeterministicMP) already supports 16 instances but its MAC-clash aliasing is 2-way;
   networking must carry N-1 input streams (star through the host is simplest), per-console hashes; Mario Kart DS supports up to 8.
+
+#### N-player design (2026-11-14, proposal, nothing built yet)
+Goal: 3-8 players, each device runs N consoles (own + N-1 hidden), only inputs and hashes on the network.
+- **Session data model**: roster = list of session ids 0..N-1 (host console = 0, joiners in join order). Each device: one primary
+  (own sid) + N-1 mirrors, one worker thread per mirror, one frame barrier (done counter per worker). Per-sid input rings,
+  per-sid hash lists. `focus` becomes a console index (watch any player).
+- **Topology: full mesh** (every device connects to every other), host is only the rendezvous. A star through the host would put
+  joiner-to-joiner input on two hops (~26 ms vs a 33 ms input delay) and stall constantly; mesh keeps one hop and costs only
+  N(N-1)/2 small ENet links (inputs ~12 bytes x 16 redundancy x 60/s per peer). Stall = wait for the slowest peer.
+- **Lobby**: joiners connect to the host as today (hello checks game/ROM/BIOS), host answers with its roster slot and the addresses of
+  the joiners so far; later joiners connect to the earlier ones too (each device listens on its own port, sent in the hello).
+  Session start needs a fixed roster: host presses Start in the existing Local multiplayer screen (also auto-start 8 s after the
+  last joiner, with a toast countdown). At Start every device snapshots its own console+firmware, sends it to every peer
+  (mesh, so no 49-transfer relay through the host), holds still until it has N-1 states, then all start at frame 0.
+  Joiners must already be in the game's group list when Start happens; nobody can join after Start.
+- **Hashes**: every 60 frames each device sends its N console hashes to all peers and compares per peer; a DESYNC names the console.
+- **Leave/stop**: a device that stops or loses any peer sends a reliable Bye to all others and closes; everyone ends the session.
+- **DeterministicMP**: MAC aliasing becomes per session id: if any MACs clash, every console gets a distinct deterministic alias;
+  rule "sender's real MAC -> alias[sender]; alias[receiver] -> real MAC[receiver]" is unchanged and works for any N.
+- **Memory**: share one read-only ROM buffer between consoles (small core change in `NDSCart`), then measure. Cap players per
+  device from available memory (refuse the join with a message).
+- **Tests**: (1) 2-player regression S23+Odin first. (2) 3 players = S23 + Odin (dev app) + Odin (nightly app, side-by-side
+  package): three real processes on the real network with real group membership. (3) 4 players = a nightly+dev app on both phones.
+  Odin menus need scripted input (adb taps are ignored there): reuse the record/replay input injection from tag `netplay-debug-tools`
+  temporarily. Proves: protocol, determinism and link at N=3-4 with every console in the group. Does not prove: 5-8 players,
+  8 real radios/jitter, thermals or memory on 4-6 GB phones (extrapolated from the benchmark only).
+- **Biggest risks**: (a) stalls/latency with N-1 peers on one router, may need a 3-frame delay (adaptive patch exists);
+  (b) fixed roster at Start (no late joiners, Start moment vs game menus); (c) link edge cases never run beyond 2 consoles
+  (reply windows with many AIDs); (d) memory on small phones; (e) 5-8 players stay unverified on real hardware.
+
+#### N-player build and tests (2026-11-14)
+Built as designed (see "N-player design" above): `MirrorSession` runs N consoles (worker thread per hidden console, per-sid input
+rings, one ENet link per other device, per-console hashes every 60 frames, `MsgBye` so a leaving player ends the session for all);
+`DeterministicMP` MAC aliases are per session id; `NetplayLobby` hosts one open listener (slots 7080+), joiners connect to the
+advertised slot, the host starts 8 s after the last joiner (or on `requestStart()`, not wired to the UI yet), then every device
+snapshots, links to every other (joiner pairs use ports 7200 + a*8 + b) and trades console states.
+- **2 players** (S23 + Odin, Mario Kart): 60+ checks, 0 desyncs after the refactor, saves byte-identical to the backups.
+- **3 players**, real wireless membership (game shows 3/8 racers): Odin host + S23 dev app + S23 nightly app (same phone) and later
+  Odin + S23 + Pixel 6a (three separate phones). Hundreds of hash checks, 0 desyncs, also through a race.
+- **Group list flicker** while joining is the game's own channel scanning (frames on the wrong channel are dropped), not a bug.
+- **Performance finding**: with 3 consoles the console threads of one device wait for each other inside the link thousands of times
+  per frame. Per-frame time of a device's own console (menus): S23/Pixel 25-30 ms (Odin 8.7), although the CPU was mostly idle.
+  Fix: a waiter spins up to 300 us before sleeping on the condition variable (`DeterministicMP::waitFor`): 12.6 / 13.7 / 8 ms.
+  In a race (3D drawing) it is still too slow on the weaker phones: Pixel 6a 34-37 ms, S23 21-37 ms, Odin 12.6 ms; the others wait for the
+  slowest device (about 29-45 fps overall). OpenGL on the S23/Pixel did not help (Pixel 37 ms). Not solved: next ideas are scheduler
+  hints (ADPF `APerformanceHint`) or core affinity for the console threads (on the S23 the three busy threads sat on two mid cores
+  while the X3 core was idle), fewer link round trips per frame, or a lower player limit for weak phones.
+- **Memory** (dumpsys, 3 consoles per device): PSS 785 MB (Odin), 831 MB (Pixel 6a), 916 MB (S23); native heap 417-441 MB.
+  Estimated ~570 MB + 125 MB per hidden console, so 8 players ~1.5 GB. Shared ROM buffer NOT done: it would save only the 32 MB ROM
+  per console (~25 %), and the cart code decrypts/re-encrypts the secure area inside the ROM buffer, so concurrent consoles must not
+  share it without a core change. A per-device player limit by RAM is in instead (`deviceMaxPlayers` in MelonDS.cpp: >= 7.5 GB: 8,
+  >= 5 GB: 6, >= 3.5 GB: 4, else 3; the host stops accepting joiners at its own limit, a joiner refuses a start above its limit).
+- **Input delay** stays 2 frames. A 3-frame trial (temporary property) did not separate network from CPU effects; with the CPU fix the
+  Pixel's input was rarely late. Not tuned further.
+- **What the phones prove / do not prove**: protocol, determinism and wireless membership at N=3 on real devices, memory at N=3.
+  Not proven: 4-8 players, 8 radios on one router, thermals, weak phones in races (see above).
+- Test rig notes: two apps on one phone need freeform windows (`am start --windowingMode 5`, then `am task resize`), otherwise Android
+  freezes the background app; the Play Protect "send for security check" dialog on the Pixel pauses the app in the background.
+
+#### Scheduling experiment (2026-11-14)
+Temporary hook (`debug.melonds.sched`, removed again): bit 0 = pin the console threads to the fast cores (cpuinfo_max_freq >= 75 % of
+the best core: S23 cores 3-7, Pixel cores 4-7), bit 1 = nice -10. Switched live during one 3-player race (Odin host, S23, Pixel,
+software renderer, 32 s per mode, per-frame time of the device's own console):
+- S23: normal 22.9-23.7 ms, fast cores 22.8, priority 22.1, both 22.1-22.3 ms (about -3 %).
+- Pixel 6a: normal 31.2-32.4 ms, fast cores 31.3, priority 30.6, both 30.4-30.7 ms (about -2 %).
+- Odin: 15.0 ms before, 14.6 ms after (no change; it was not asked to do anything).
+Conclusion: scheduling is NOT the lever (affinity and priority calls succeeded, effect within a few %). The same race with 2 players took
+~8-10 ms per frame, so the extra ~10-20 ms per frame with 3 consoles is spent elsewhere, most likely waiting inside the link
+(DeterministicMP) for the other consoles' emulated time (the extra wireless replies in a race). Next step would be to measure the wait time
+inside `waitFor` per frame and then loosen how tightly the consoles are coupled (publish time earlier / more often, fewer wake-ups).
+
+#### Wait profiling in a 3-player race (2026-11-14)
+Temporary code (still in the tree, marked TEMP: `waitStatsText`, `WaitTimer`, log line "waits:") measures, per console thread and per frame,
+the time and number of waits inside `DeterministicMP::waitFor` (poll = RecvPacket, hostleft = RecvHostPacket's "did the host leave" check,
+hostpkt = waiting for a host packet, replies = RecvReplies). Race, Odin host + S23 + Pixel, software renderer:
+- Host console c0: poll waits 4 x per frame, 7.1 ms (Odin) / 12.7 (S23) / 16.4 (Pixel) per frame.
+- Client consoles c1, c2: hostleft waits 18-50 x per frame, 10-18 ms per frame; hostpkt waits ~118 x per frame but only ~1-3 ms.
+- Own-console time per frame in the same window: Odin 15.0, S23 20.6-22.1, Pixel 27-30 ms.
+Reading: the clients cannot move past the host's emulated time (they must know the host has not sent anything earlier), and the host cannot
+poll past the clients' time, so the console threads take turns instead of running in parallel. Frame time is roughly the SUM of the
+consoles' work, not the maximum. That fits 2 players ~8-10 ms and 3 players 15 (Odin) to 22-30 (S23/Pixel). It also means the earlier
+"9 consoles at 7 ms" benchmark (unlinked consoles, truly parallel) does NOT predict linked sessions: expect frame time ~ N x per-console
+cost. For the Odin (~5 ms per console) that is 3 players ok, 4+ players likely below 60 fps.
+Idea to fix (not built): let each console publish a lower bound for its next possible send (lookahead) so the others can run ahead
+by that margin in parallel (conservative parallel simulation); needs care to stay deterministic.
+
+#### CORRECTION: reply-window bug found, "turn-taking" theory withdrawn (2026-11-14)
+- **Bug (fixed)**: `DeterministicMP::RecvReplies` counted a client's reply only if it arrived within a fixed 2 ms window after the host's CMD.
+  One client fits; with two clients the second reply lands later and was dropped as "late" (about 3,200 late replies per 10 s at the
+  countdown on all three devices), so the game froze with "Communication error" (seen twice at race start with 3 players). The window is now
+  `kReplyWindow * max(1, number of other consoles in the session)`; 1 client = unchanged. After the fix a 3-player race ran for 46+ game
+  seconds (lap 2 of 3, Odin 1st, S23 + Pixel following) on three phones, 160+ hash checks, 0 desyncs, no error.
+- **Open: "stale" replies**: in that race about 3,000 of ~7,200 replies per 10 s were rejected by the `wifiTimestamp + 32 < timestamp` check
+  (only counted when no valid reply from that console was seen); the game still ran, so this may be harmless, but it was not studied.
+- **Wait profiling reading was wrong**: the earlier note ("consoles take turns, frame time is the SUM of the consoles") is not supported by
+  the CPU-time measurement. Per-frame CPU time of a console thread in a 3-player race: Odin own 9.5 ms / hidden 13.5 ms; S23 own 21.4 / hidden
+  14.9; Pixel own 25 / hidden 22.5. Wall time per frame (24.5 S23, 33 Pixel, 10-16 Odin) is about the device's own thread, so the hidden
+  consoles DO run in parallel. In menus: own 10-12 ms (S23/Pixel) / 5.3 (Odin), hidden ~5.5 ms.
+- **Revised view**: the limit is the cost of one console in a race (hidden consoles still run the whole game engine incl. 3D geometry: 13-22 ms
+  per frame, only the drawing is skipped) plus the own console's drawing. A device needs about N-1 extra cores for N players, each ~80-130 % of
+  a 16.7 ms frame on the Odin/S23. The Odin can just about hold 60 fps with 3 players (16 ms with hidden consoles); the Pixel 6a (33 ms) and
+  S23 (24 ms) cannot. More Odins would keep the same frame time only while cores and thermals last (roughly up to 5-6 players on 8 cores,
+  unproven), and the weakest device sets the pace for everyone.
+- Scheduling hints (affinity/priority) gave 2-3 %. TEMP profiling code (wait times, CPU times, reply diagnostics) is removed again.
+
+## Pre-commit review (2026-11-14, unattended)
+Cleanup only, no behaviour change: removed the unused `kind` argument of `DeterministicMP::waitFor`, made the spin-wait hint
+portable (`yield` on ARM, `pause` on x86, since the app also builds x86_64), merged a duplicate namespace block in
+`NetplayLink.cpp`, tidied includes and blank lines. Debug build (arm64, optimised native) compiles. Not re-tested on devices.
+Known gaps found in review: the host only checks its own player cap, so a joiner with a lower cap rejects the start and the
+host waits out the 30 s exchange timeout; `checkHello` reads the joiner MAC but does not use it; the origin remote is upstream
+(rafaelvcaetano), and the core submodule commits are local only.

@@ -144,3 +144,16 @@ namespace MelonDSAndroid
 uint32_t NetplayLink::rttMs() const { return peer ? peer->roundTripTime : 0; }
 uint32_t NetplayLink::rttVarianceMs() const { return peer ? peer->roundTripTimeVariance : 0; }
 }
+
+namespace MelonDSAndroid
+{
+std::string NetplayLink::peerAddress() const
+{
+    if (!peer || !connected)
+        return "";
+    char text[64] = {};
+    if (enet_address_get_host_ip(&peer->address, text, sizeof(text)) != 0)
+        return "";
+    return text;
+}
+}
