@@ -321,3 +321,15 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   (worst wait 55 ms), about 1 s of stall per 10 s. With a 2-frame delay it was late in 0-7% of frames.
   Conclusion: 1 frame does not work on this network (one-way ~13 ms is close to a frame, plus jitter); keep 2.
   Next ideas if wanted: Wi-Fi Direct / hotspot and re-test, or adaptive 1-3 frames chosen from measured lateness.
+
+#### Adaptive input delay (2026-11-14)
+- **Decision: not committed, code reverted.** The full change is kept as `docs/netplay-adaptive-delay.patch` (apply with `git apply`, against commit 7fd736e8).
+- Each device watches how often the other device's input is late (window of 30 frames) and asks it, with a reliable
+  `MsgDelay`, to publish its input 2-4 frames ahead (`netAdaptDelay`). The delay is a property of the sender only, so no
+  agreement is needed: raising it fills the gap with the last input, lowering it drops the live input for a few frames;
+  both devices still apply the same stream. Up: >= 6 of 30 frames late. Down: only after ~30 s (backoff doubles after a
+  failed try) with 10 calm windows, one window skipped after every change.
+- Tested with forced start delays (temporary property): started at 1 it climbed to 2-3 within seconds, 0 desyncs.
+- First version allowed 1 frame as the floor: on this Wi-Fi the downward probes failed every time and the player felt
+  hitching (user report). Floor is now 2, so the delay only goes up (poor networks) and back down to 2.
+- Default session on this network: stays at 2, no changes, user reports smooth play. Not tested on a poor network.

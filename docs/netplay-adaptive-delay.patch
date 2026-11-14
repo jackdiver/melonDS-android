@@ -1,0 +1,192 @@
+diff --git a/app/src/main/cpp/netplay/MirrorSession.cpp b/app/src/main/cpp/netplay/MirrorSession.cpp
+index 0a361d4b..56a4a786 100644
+--- a/app/src/main/cpp/netplay/MirrorSession.cpp
++++ b/app/src/main/cpp/netplay/MirrorSession.cpp
+@@ -256,7 +256,10 @@ MelonInstance* MirrorSession::getInstance(int index)
+ // ---------------------------------------------------------------------------------------------------------------
+ namespace
+ {
+-enum NetMsg : uint8_t { MsgInput = 4, MsgHash = 5 };
++enum NetMsg : uint8_t { MsgInput = 4, MsgHash = 5, MsgDelay = 6 };
++constexpr int kMinDelay = 2, kMaxDelay = 4, kInitialDelay = 2; // 1 frame hitches on ordinary Wi-Fi (see docs), so 2 is the floor
++constexpr uint32_t kDelayWindow = 30;          // frames per lateness window
++constexpr uint32_t kProbeBackoffBase = 1800;   // frames (30 s) before trying a lower delay; doubles after each failed try
+ constexpr int kInputRedundancy = 16;
+ constexpr uint32_t kHashInterval = 60;
+ constexpr uint64_t kStallGiveUpMs = 600000; // the other device may be paused; a lost connection is detected by the link itself
+@@ -352,6 +355,16 @@ void MirrorSession::netOnPacket(const uint8_t* data, size_t size)
+         }
+         break;
+     }
++    case MsgDelay:
++    {
++        uint8_t d;
++        if (!get(p, end, d)) return;
++        int nd = std::max(kMinDelay, std::min(kMaxDelay, (int) d));
++        if (nd != netDelay)
++            LOGI("netplay: other device asked for input delay %d (was %d)", nd, netDelay);
++        netDelay = nd;
++        break;
++    }
+     case MsgHash:
+     {
+         uint32_t frame; uint64_t h0, h1;
+@@ -422,6 +435,7 @@ bool MirrorSession::netBeforeFrame()
+     }
+     netFramesSinceLog++;
+     netStalled = false;
++    netAdaptDelay(start != 0);
+     if (start != 0)
+     {
+         uint64_t stalled = nowMs() - start;
+@@ -441,9 +455,20 @@ void MirrorSession::netInputHook(int index, FrameInput& input)
+     {
+         // The live input is applied `netDelay` frames from now (on both devices)
+         uint32_t target = netFrame + netDelay;
+-        netLocal[target % kInputRing] = InputSlot { target, input };
+-        netLocalLast = target;
+-        netLocalCount++;
++        if (target > netLocalLast)
++        {
++            // Delay was raised: frames between the old and new target repeat the last input, so the stream stays gap-free
++            const FrameInput last = netLocal[netLocalLast % kInputRing].input;
++            for (uint32_t f = netLocalLast + 1; f < target; f++)
++            {
++                netLocal[f % kInputRing] = InputSlot { f, last };
++                netLocalCount++;
++            }
++            netLocal[target % kInputRing] = InputSlot { target, input };
++            netLocalLast = target;
++            netLocalCount++;
++        }
++        // else: delay was lowered and this frame is already published; the live input is dropped
+         const InputSlot& slot = netLocal[netFrame % kInputRing];
+         input = slot.frame == netFrame ? slot.input : kNeutralInput;
+     }
+@@ -487,9 +512,9 @@ void MirrorSession::netAfterFrame()
+         }
+         else if (netHashChecks % 10 == 0)
+             {
+-            LOGI("netplay: frame %u in sync (%u checks, %u desyncs, stall %llu ms); input late in %u of %u frames, worst wait %llu ms; rtt %u ms +-%u",
++            LOGI("netplay: frame %u in sync (%u checks, %u desyncs, stall %llu ms); input late in %u of %u frames, worst wait %llu ms; rtt %u ms +-%u; delay mine %d, theirs %d",
+                  l.first, netHashChecks, netDesyncs, (unsigned long long) netStallMs, netLateFramesSinceLog, netFramesSinceLog,
+-                 (unsigned long long) netMaxWaitSinceLog, net ? net->rttMs() : 0, net ? net->rttVarianceMs() : 0);
++                 (unsigned long long) netMaxWaitSinceLog, net ? net->rttMs() : 0, net ? net->rttVarianceMs() : 0, netDelay, netPeerDelay);
+             netFramesSinceLog = netLateFramesSinceLog = 0;
+             netMaxWaitSinceLog = 0;
+         }
+@@ -537,6 +562,12 @@ void MirrorSession::netBeginRunning()
+     netLocalHashes.clear();
+     netRemoteHashes.clear();
+     netDesyncs = netHashChecks = 0;
++    netPeerDelay = netDelay; // both devices start with the same delay (the value passed to startNetSession)
++    netWinFrames = netWinLate = netCalmWindows = 0;
++    netNextProbeFrame = kProbeBackoffBase;
++    netProbeBackoff = kProbeBackoffBase;
++    netProbing = false;
++    netSettleWindows = 0;
+     netStallMs = 0;
+     netFrameShown = 0;
+     netDesyncsShown = 0;
+@@ -641,3 +672,76 @@ void MirrorSession::servicePaused()
+         netEnd("peer disconnected");
+ }
+ }
++
++namespace MelonDSAndroid
++{
++// Called once per frame by the receiving side with "did this frame's remote input arrive late". Decides how far ahead
++// the other device should publish its input: up when input is often late, and a cautious probe downwards when it never is.
++void MirrorSession::netAdaptDelay(bool late)
++{
++    netWinFrames++;
++    if (late) netWinLate++;
++    if (netWinFrames < kDelayWindow)
++        return;
++
++    uint32_t lateCount = netWinLate;
++    netWinFrames = netWinLate = 0;
++    if (netSettleWindows > 0)
++    {
++        netSettleWindows--; // the window right after a change still holds frames from the old delay
++        return;
++    }
++    int wanted = netPeerDelay;
++
++    if (netProbing)
++    {
++        if (lateCount >= 4)
++        {
++            // The lower delay does not work on this network: go back and wait longer before the next try
++            wanted = netPeerDelay + 1;
++            netProbeBackoff = std::min<uint32_t>(netProbeBackoff * 2, kProbeBackoffBase * 16);
++            netNextProbeFrame = netFrame + netProbeBackoff;
++            netProbing = false;
++            netCalmWindows = 0;
++            LOGI("netplay: input delay %d failed (%u of %u frames late), going back", netPeerDelay, lateCount, kDelayWindow);
++        }
++        else if (++netCalmWindows >= 4)
++        {
++            netProbing = false;
++            netProbeBackoff = kProbeBackoffBase;
++            netNextProbeFrame = netFrame + netProbeBackoff;
++            LOGI("netplay: input delay %d works", netPeerDelay);
++        }
++    }
++    else if (lateCount >= 6)
++    {
++        wanted = netPeerDelay + 1;
++        netNextProbeFrame = netFrame + netProbeBackoff;
++        netCalmWindows = 0;
++    }
++    else
++    {
++        netCalmWindows = lateCount <= 1 ? netCalmWindows + 1 : 0;
++        if (netPeerDelay > kMinDelay && netFrame >= netNextProbeFrame && netCalmWindows >= 10)
++        {
++            wanted = netPeerDelay - 1;
++            netProbing = true;
++            netCalmWindows = 0;
++        }
++    }
++
++    wanted = std::max(kMinDelay, std::min(kMaxDelay, wanted));
++    if (wanted != netPeerDelay)
++    {
++        LOGI("netplay: asking the other device for input delay %d (was %d, %u of %u frames late)", wanted, netPeerDelay,
++             lateCount, kDelayWindow);
++        netPeerDelay = wanted;
++        netSettleWindows = 1;
++        std::vector<uint8_t> msg;
++        msg.push_back(MsgDelay);
++        put(msg, (uint8_t) wanted);
++        net->send(msg.data(), msg.size(), true);
++        net->flush();
++    }
++}
++}
+diff --git a/app/src/main/cpp/netplay/MirrorSession.h b/app/src/main/cpp/netplay/MirrorSession.h
+index 241d9291..68b3b674 100644
+--- a/app/src/main/cpp/netplay/MirrorSession.h
++++ b/app/src/main/cpp/netplay/MirrorSession.h
+@@ -73,6 +73,7 @@ private:
+     static constexpr int kInputRing = 4096;
+     void handleNetRequest();
+     bool netBeforeFrame();
++    void netAdaptDelay(bool late);
+     void netAfterFrame();
+     void netInputHook(int index, FrameInput& input);
+     void netOnPacket(const uint8_t* data, size_t size);
+@@ -115,6 +116,12 @@ private:
+     uint32_t netDesyncs = 0;
+     uint32_t netHashChecks = 0;
+     uint64_t netStallMs = 0;
++    // Adaptive input delay: this device chooses (from how late the other device's input arrives) how far ahead the OTHER
++    // device publishes its input, and asks for it with MsgDelay. netDelay is what this device itself uses.
++    int netPeerDelay = 2;
++    uint32_t netWinFrames = 0, netWinLate = 0, netCalmWindows = 0, netNextProbeFrame = 0, netProbeBackoff = 0;
++    bool netProbing = false;
++    uint32_t netSettleWindows = 0;
+     uint32_t netFramesSinceLog = 0, netLateFramesSinceLog = 0;
+     uint64_t netMaxWaitSinceLog = 0;
+     std::atomic<uint32_t> netFrameShown { 0 };
