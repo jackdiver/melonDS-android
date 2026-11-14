@@ -347,3 +347,25 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   by decision: players must be able to keep using a custom BIOS. The warning toast stays: when hosting or searching starts
   with a custom BIOS or DSi mode set it says both devices need the built-in BIOS and DS mode (change in Settings, restart).
   Rewind is blocked live during a session; the renderer is free.
+
+#### Wi-Fi Direct experiment (2026-11-14)
+Code: debug-only `app/src/debug/.../P2pTestActivity.kt` (uncommitted; forms a group with a fixed name/passphrase and pings
+at 60 Hz). The native hooks used for the session test (lobby over 192.168.49.x, trial input delay) were temporary and reverted.
+- **Setup**: host calls `WifiP2pManager.createGroup(config with fixed network name + passphrase, 5 GHz at the home AP's
+  frequency)`; the other device calls `connect()` with the same name/passphrase. No invitation dialog, no user taps; about 1 s
+  to create, 1-5 s to join. Needs the NEARBY_WIFI_DEVICES runtime permission (location below Android 13). Both phones stayed
+  on the home Wi-Fi at the same time (STA + P2P concurrency worked on both).
+- **Compatibility**: S23 (Android 17) joined the Odin's group fine. The Odin (Android 13, Qualcomm) could NOT join the S23's group
+  by credentials ("P2P: Failed to find the group with network name ...", also with a frequency hint and a scan first), but hosts fine.
+  So who hosts matters, and joining by credentials is not safe everywhere; fallbacks (service discovery, invitation dialog) untested.
+- **Lobby**: the game lobby's 255.255.255.255 broadcast does not use the p2p interface. Over Wi-Fi Direct the adverts had to be sent
+  to 192.168.49.255 plus both group addresses; then the group showed in the join list and a session formed (in sync, 150 checks).
+- **Latency** (60 packets/s UDP, 45 s, screens on, low-latency lock): LAN (home Wi-Fi) rtt p50 10.8-11.9 ms, p90 13.5-14.7, p99 17.7-19.1,
+  p99.9 25-41, max 33-71, 2-4% of packets above 16.7 ms. Wi-Fi Direct: p50 7.0, p90 10.5-10.6, p99 13.3-13.9, p99.9 17-18, max 20-25,
+  0.2% above 16.7 ms, no loss. About 4 ms lower median and far fewer spikes. (First LAN run was invalid: the S23 screen was off and
+  Android throttled the app; always keep the screen on.)
+- **1-frame delay over Wi-Fi Direct (real session)**: still late input in 25% (S23) to 75-90% (Odin) of frames, ~22% of the time lost
+  to stalls. So the transport is no longer the limit: with a 1-frame buffer the other device's input must arrive within 16.7 ms of
+  its own frame start, and the two devices' frame clocks are not phase-aligned (offset up to a full frame), so it is late about
+  half the time on any network. Using 1 frame would need phase-locking the frame starts (follower starts its frame when the
+  leader's input arrives), not a faster link.
