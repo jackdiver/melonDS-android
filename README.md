@@ -8,10 +8,27 @@ Android port of [melonDS](https://melonds.kuribo64.net/), a DS and DSi emulator.
 |![Screenshot 1](./.github/images/screenshot_mobile0.png)|![Screenshot 2](./.github/images/screenshot_mobile1.png)|![Screenshot 3](./.github/images/screenshot_mobile2.png)|![Screenshot 4](./.github/images/screenshot_mobile3.png)|
 
 # Missing Features
-*  Local Multiplayer
 *  DSi SD card support
 *  Customizable button skins
 *  More display filters
+
+# Local Multiplayer (Wi-Fi)
+This fork can play the DS's own local-wireless modes (for example Mario Kart DS: Multiplayer) between 2 to 8 Android devices on the same Wi-Fi network. No hotspot or SIM is needed.
+
+**How to use it**
+1. Both devices: same game ROM, same BIOS setting (built-in BIOS recommended), and the **software** video renderer for the lobby to start.
+2. On one device, open the game's multiplayer menu and create a group. On the others, open the same menu and wait for the group to appear, then join it.
+3. The session starts a few seconds after the last player joins. The pause menu has a "Local multiplayer" screen with the status and a Stop button.
+
+**How it works.** Every device runs every player's console, and only the controller inputs travel over the network. A deterministic in-process wireless link keeps all copies identical, and state checks every 60 frames detect any mismatch. Each extra player costs about 125 MB of memory and CPU time, so the player limit depends on the device's RAM.
+
+**Limits**
+* Only Mario Kart DS has been tested. Download Play only games (such as Mario Party DS) are not supported.
+* 2 and 3 players are tested; 4 to 8 are not. Slower phones may not keep full speed with 3 or more players.
+* Both devices need Wi-Fi and the local network permission. Rewind is disabled during a session.
+* Loading a save state from another device overwrites the game's save, so back up your saves first.
+
+More detail: [docs/netplay-plan.md](docs/netplay-plan.md).
 
 # Performance
 Performance is solid on 64 bit devices with thread rendering and JIT enabled, and should run at full speed on flagship devices. Performance on older devices, specially
