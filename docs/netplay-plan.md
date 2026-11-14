@@ -369,3 +369,13 @@ at 60 Hz). The native hooks used for the session test (lobby over 192.168.49.x, 
   its own frame start, and the two devices' frame clocks are not phase-aligned (offset up to a full frame), so it is late about
   half the time on any network. Using 1 frame would need phase-locking the frame starts (follower starts its frame when the
   leader's input arrives), not a faster link.
+
+#### Status summary (2026-11-14)
+- Committed up to `0f53d48e`; nothing pushed. Netplay works between the S23 and the Odin on a shared Wi-Fi network with a
+  2-frame input delay, any video renderer, no settings import, custom BIOS allowed (with a warning toast).
+- Performance: the hidden console draws neither 3D nor 2D unless the game captures the screen; the stalled toast repeats; the
+  session log shows late-input counts and rtt every 10 s.
+- Decisions: keep the 2-frame delay (1 frame hitches; adaptive delay and Wi-Fi Direct shelved, notes above); no forced BIOS/DS
+  mode; settings import dropped because the stock app cannot make a backup.
+- Open: the display-capture fallback is untested by any game; only Mario Kart DS tested; the freeze after a whole cup was seen
+  once; phase-locking the frame starts is the next lever for lower latency.
