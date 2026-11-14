@@ -115,6 +115,8 @@ private:
     uint32_t netDesyncs = 0;
     uint32_t netHashChecks = 0;
     uint64_t netStallMs = 0;
+    uint32_t netFramesSinceLog = 0, netLateFramesSinceLog = 0;
+    uint64_t netMaxWaitSinceLog = 0;
     std::atomic<uint32_t> netFrameShown { 0 };
     std::atomic<uint32_t> netDesyncsShown { 0 };
     std::atomic<bool> netStalled { false }; // waiting for the other device's input

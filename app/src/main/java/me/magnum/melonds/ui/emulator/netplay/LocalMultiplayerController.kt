@@ -41,6 +41,7 @@ class LocalMultiplayerController(
     private var polling = false
     private var dialogStatusView: TextView? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var permissionRequested = false
     private var lastStalledToastMs = 0L
 
@@ -51,6 +52,7 @@ class LocalMultiplayerController(
             announceChanges(lastStatus, status)
             lastStatus = status
             repeatStalledToast(status)
+            updateWifiLock(status.phase)
             if (polling)
                 handler.postDelayed(this, POLL_MS)
         }
@@ -98,6 +100,8 @@ class LocalMultiplayerController(
         handler.removeCallbacks(poll)
         multicastLock?.let { if (it.isHeld) it.release() }
         multicastLock = null
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
     }
 
     private fun acquireMulticastLock() {
@@ -106,6 +110,22 @@ class LocalMultiplayerController(
         multicastLock = wifi.createMulticastLock("melonDS-netplay").apply {
             setReferenceCounted(false)
             try { acquire() } catch (_: SecurityException) { }
+        }
+    }
+
+    // Low-latency mode stops Wi-Fi power saving, which otherwise delays packets by tens of ms in bursts (Android 10+).
+    // Only held while multiplayer is in use (it costs battery).
+    private fun updateWifiLock(phase: String) {
+        val wanted = phase == "hosting" || phase == "searching" || phase == "joining" || phase == "running" || phase == "stalled"
+        if (wanted && wifiLock == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val wifi = activity.applicationContext.getSystemService(WifiManager::class.java) ?: return
+            wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "melonDS-netplay").apply {
+                setReferenceCounted(false)
+                try { acquire() } catch (_: SecurityException) { }
+            }
+        } else if (!wanted) {
+            wifiLock?.let { if (it.isHeld) it.release() }
+            wifiLock = null
         }
     }
 

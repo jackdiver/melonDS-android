@@ -29,6 +29,8 @@ public:
     void close();
 
     bool isConnected() const { return peer != nullptr && connected; }
+    uint32_t rttMs() const;     // ENet smoothed round trip time
+    uint32_t rttVarianceMs() const;
 
     // Waits up to timeoutMs for traffic; calls onPacket for each packet received. Returns the last
     // connection event seen.

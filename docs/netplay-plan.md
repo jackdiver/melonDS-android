@@ -300,3 +300,17 @@ Debug dumps currently fire at recFrame 573/5408/5409 (MirrorSession.cpp).
   of the session, and a capture that begins in an unrendered frame is rendered on demand at its first scanline
   (log: "hidden console: screen capture seen"). Mario Kart DS never triggered it. Test: Odin + S23 in a race,
   150 checks, 0 desyncs. The capture fallback itself has not been exercised by any game yet.
+
+#### Latency logging, Wi-Fi lock, more CPU experiments (2026-11-14)
+- Log line every 10 s now also shows how many frames the remote input was late, the worst wait and ENet's rtt.
+  ENet's rtt (~27 ms +-7 here) is only sampled with reliable packets and the link is serviced once per frame, so it
+  overestimates; "input late in N of 600 frames" is the real measure. Runs: late in 0-42 of 600 frames, worst wait
+  <= 11 ms with a 2-frame (33 ms) delay -> the delay has plenty of slack; try 1 frame (adaptive delay).
+- `WIFI_MODE_FULL_LOW_LATENCY` WifiLock is held while the lobby/session is active (`LocalMultiplayerController`),
+  released when idle. Verified held on the Odin (`dumpsys wifi`: type=4).
+- Experiment flags (setprop debug.melonds.mirrorexp, since removed): 1 = hidden console skips 2D drawing, 2 = lower priority (nice 10). Result: 1 was made permanent (below), 2 dropped; details:
+  drawing (engine B, and engine A unless display capture is latched; `MirrorRenderer2D`), 2 = hidden console thread at
+  lower priority (nice 10). Race, Odin + S23: hidden-console thread 41-46% -> 26-30% of a core with flag 1, 0 desyncs in
+  both runs. Flag 2 changed total CPU not at all; stall numbers were better in that run but it was a different run, so
+  inconclusive. Not committed; flags still behind the property.
+- Made permanent (2D skip, `MirrorRenderer2D`); the priority flag and the property were removed.

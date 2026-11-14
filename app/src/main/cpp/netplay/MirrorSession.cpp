@@ -420,11 +420,14 @@ bool MirrorSession::netBeforeFrame()
         // isConnected() check at the top of the loop.
         net->service(2, onPacket);
     }
+    netFramesSinceLog++;
     netStalled = false;
     if (start != 0)
     {
         uint64_t stalled = nowMs() - start;
         netStallMs += stalled;
+        netLateFramesSinceLog++;
+        if (stalled > netMaxWaitSinceLog) netMaxWaitSinceLog = stalled;
         if (stalled > 100)
             LOGI("netplay: waited %llu ms for input of frame %u", (unsigned long long) stalled, netFrame);
     }
@@ -483,8 +486,13 @@ void MirrorSession::netAfterFrame()
                  l.second.first == r.second.first ? "ok" : "differs", l.second.second == r.second.second ? "ok" : "differs");
         }
         else if (netHashChecks % 10 == 0)
-            LOGI("netplay: frame %u in sync (%u checks, %u desyncs, stall %llu ms)", l.first, netHashChecks, netDesyncs,
-                 (unsigned long long) netStallMs);
+            {
+            LOGI("netplay: frame %u in sync (%u checks, %u desyncs, stall %llu ms); input late in %u of %u frames, worst wait %llu ms; rtt %u ms +-%u",
+                 l.first, netHashChecks, netDesyncs, (unsigned long long) netStallMs, netLateFramesSinceLog, netFramesSinceLog,
+                 (unsigned long long) netMaxWaitSinceLog, net ? net->rttMs() : 0, net ? net->rttVarianceMs() : 0);
+            netFramesSinceLog = netLateFramesSinceLog = 0;
+            netMaxWaitSinceLog = 0;
+        }
         netLocalHashes.erase(netLocalHashes.begin());
         netRemoteHashes.erase(netRemoteHashes.begin());
     }

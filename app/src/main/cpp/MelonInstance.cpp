@@ -20,6 +20,43 @@
 #include "net/Net_Slirp.h"
 #include "Platform.h"
 #include "SDCardArgsBuilder.h"
+#include "GPU2D_Soft.h"
+#include "netplay/NetplayCommon.h"
+
+// 2D renderer for the hidden console. 2D output only feeds back into emulated state through display
+// capture (engine A, DISPCAPCNT bit 31, latched at line 0), so engine B and engine A without a capture are skipped.
+namespace
+{
+class MirrorRenderer2D : public melonDS::GPU2D::Renderer2D
+{
+public:
+    explicit MirrorRenderer2D(melonDS::GPU& gpu) : soft(gpu) {}
+    void DrawScanline(melonDS::u32 line, melonDS::GPU2D::Unit* unit) override
+    {
+        if (unit->Num != 0 || !(unit->CaptureCnt & (1u << 31)))
+            return;
+        if (line == 0 && !sprites0Drawn)
+            soft.DrawSprites(0, unit); // sprites of line 0 were skipped at the end of the previous frame
+        sprites0Drawn = false;
+        soft.SetFramebuffer(Framebuffer[0], Framebuffer[1]);
+        soft.DrawScanline(line, unit);
+    }
+    void DrawSprites(melonDS::u32 line, melonDS::GPU2D::Unit* unit) override
+    {
+        if (unit->Num != 0 || !(unit->CaptureCnt & (1u << 31)))
+        {
+            if (line == 0) sprites0Drawn = false;
+            return;
+        }
+        soft.DrawSprites(line, unit);
+        if (line == 0) sprites0Drawn = true;
+    }
+    void VBlankEnd(melonDS::GPU2D::Unit* unitA, melonDS::GPU2D::Unit* unitB) override { soft.VBlankEnd(unitA, unitB); }
+private:
+    melonDS::GPU2D::SoftRenderer soft;
+    bool sprites0Drawn = false;
+};
+}
 
 // 3D renderer for the hidden mirror console. 3D output never feeds back into emulated state, except when a game
 // captures the screen into VRAM (display capture, bit 31 of DISPCAPCNT on engine A). So it draws nothing until a
@@ -751,6 +788,7 @@ RewindWindow MelonInstance::getRewindWindow()
 void MelonInstance::useMirrorRenderer()
 {
     nds->GPU.SetRenderer3D(std::make_unique<MirrorRenderer3D>());
+    nds->GPU.SetRenderer2D(std::make_unique<MirrorRenderer2D>(nds->GPU));
     nullRenderer = true;
 }
 

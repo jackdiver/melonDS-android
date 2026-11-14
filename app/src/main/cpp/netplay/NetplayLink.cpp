@@ -138,3 +138,9 @@ void NetplayLink::flush()
 }
 
 }
+
+namespace MelonDSAndroid
+{
+uint32_t NetplayLink::rttMs() const { return peer ? peer->roundTripTime : 0; }
+uint32_t NetplayLink::rttVarianceMs() const { return peer ? peer->roundTripTimeVariance : 0; }
+}
